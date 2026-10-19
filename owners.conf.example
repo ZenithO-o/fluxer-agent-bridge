@@ -1,0 +1,3 @@
+# owner  uid   (one container per owner: <prefix>-<owner>, runs as uid:uid, mounts owners/<owner> ro + state/<owner>)
+# bin/add-bot.sh creates owners.conf and appends new owners automatically (uids from 10001). Example:
+# alice 10001

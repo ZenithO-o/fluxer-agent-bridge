@@ -1,0 +1,35 @@
+name: ci
+on:
+  push:
+    branches: [main]
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: image
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: image/package-lock.json
+      - run: npm ci --ignore-scripts --no-audit --no-fund
+      - run: node patches/apply-fluxerjs-ws-close-4000.mjs
+      - run: npm run typecheck
+      - run: npm test
+  shell:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: for f in bin/*.sh examples/receivers/*.sh; do sh -n "$f"; done
+      - run: python3 -m py_compile examples/*.py examples/receivers/*.py tools/*.py
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build -t fluxer-agent-bridge:ci image/
