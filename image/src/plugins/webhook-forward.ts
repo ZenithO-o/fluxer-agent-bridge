@@ -321,7 +321,7 @@ export default definePlugin({
         st.lastError = `HTTP ${res.status || 'network error'} at ${new Date().toISOString()}`;
         if (res.permanent) {
           st.paused = true; st.state = 'paused';
-          ctx.log.error('webhook rejected the batch; delivery paused until config reload', { status: res.status });
+          ctx.log.error('webhook rejected the batch; delivery paused until this bot process restarts', { status: res.status });
           ctx.health.degrade(`webhook HTTP ${res.status}`, 'dnd');
           continue;
         }

@@ -1,4 +1,5 @@
 # Shared settings for bin/*.sh (sourced, not executed).
+# BB_ is the old private name bot-bridge. The prefix is kept so existing hosts keep working.
 # BB_HOME   install dir (default: the checkout this script lives in)
 # BB_PREFIX container name prefix (default "fab": containers are fab-<owner>)
 # bridge.env (in BB_HOME, not committed) sets FLUXER_INSTANCE=https://your-fluxer.example and optional BB_IMAGE.

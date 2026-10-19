@@ -11,7 +11,8 @@ export type BotState = 'starting' | 'ready' | 'reconnecting' | 'failed' | 'stopp
 const FATAL = new Set([4004, 4010, 4011, 4012]);
 const PRESENCE_MIN_GAP_MS = 15000;      // default for bots without activity-status (health changes only)
 const PRESENCE_MAX_PER_MIN = 12;        // default cap on op 3 sends per rolling minute
-const PRESENCE_MAX_PER_20S = 4;         // hard cap: Fluxer documents max 5 presence updates per 20 s per session
+const PRESENCE_MAX_PER_20S = 4;         // Fluxer documents max 5 presence updates per 20 s per session
+const ASSUMED_HEARTBEAT_MS = 41250;
 
 export class BotRuntime {
   state: BotState = 'starting';
@@ -218,7 +219,7 @@ export class BotRuntime {
 
   healthy(): boolean {
     if (this.state !== 'ready') return false;
-    return this.lastAckAt !== null && Date.now() - this.lastAckAt < 2 * 41250 + 15000;
+    return this.lastAckAt !== null && Date.now() - this.lastAckAt < 2 * ASSUMED_HEARTBEAT_MS + 15000;
   }
 
   status() {
