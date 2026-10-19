@@ -51,17 +51,17 @@ python3 mcp/fluxer.py listen
 
 `listen` binds `127.0.0.1:8788`. A container cannot dial that address. Point `WEBHOOK_URL` there only when the bridge process is on this machine. A bot whose URL still points at a hosted webhook routine does not wake this session.
 
-## Stay in the server you were asked in
+## Guild check (optional)
 
-Writes are pinned to the guild of the message being answered, and they fail closed. Copy `guild_id` from the payload (or the `guild` that `events` adds) into `--guild`, or use `--dm` for a DM. In MCP, pass `guild_id` or `dm: true`. A wake can export `FLUXER_CONTEXT_GUILD=<id>|dm` instead. A channel in another guild, or one that cannot be resolved, is refused before anything is sent (exit 3, or `isError`). `--dry-run` checks without writing. See [Guild pinning](reference.md#guild-pinning).
+Cross-server posting is allowed. To assert that a reply stays in the server it answers, copy `guild_id` from the payload (or the `guild` that `events` adds) into `--guild`, or use `--dm` for a DM. In MCP, pass `guild_id` or `dm: true`. A wake can export `FLUXER_CONTEXT_GUILD=<id>|dm` instead. With a context, a channel in another guild, or one that cannot be resolved, is refused before anything is sent (exit 3, or `isError`). Without a context the write is not checked. For an intentional cross-server post, pass the target channel's guild or omit the guild. `FLUXER_REQUIRE_GUILD=1` (for `bin/post.sh`, `require_guild = true` in the bot's `bot.toml`) makes the context mandatory. `--dry-run` checks without writing. See [Guild check](reference.md#guild-check-optional).
 
-An agent that posts by SSH into the bridge host should use `bin/post.sh`. It posts with the token inside the container, applies the same check, and types first, so the agent machine never needs the token:
+An agent that posts by SSH into the bridge host should use `bin/post.sh`. It posts with the token inside the container, applies the same optional check, and types first, so the agent machine never needs the token:
 
 ```sh
 printf '%s' "$TEXT" | ssh bridge-host sudo /opt/fluxer-agent-bridge/bin/post.sh alice alice_bot --guild "$GUILD" "$CHANNEL" -
 ```
 
-This guards the tools, not the token. Anyone holding a raw token can still post anywhere the bot can see. On the roadmap: post only through the bridge, and remove tokens from agent machines.
+This checks the tools, not the token. Anyone holding a raw token can still post anywhere the bot can see. On the roadmap: post only through the bridge, and remove tokens from agent machines.
 
 ## Acknowledge with a reaction
 
@@ -72,7 +72,7 @@ bin/fluxer --bot alice_bot --guild "$GUILD" react "$CHANNEL" "$MSG" "👍"      
 bin/fluxer --bot alice_bot --guild "$GUILD" unreact "$CHANNEL" "$MSG" "👍"
 ```
 
-MCP: `react {"bot": "alice_bot", "guild_id": "<guild>", "channel_id": "<ch>", "message_id": "<msg>", "emoji": "👍"}` returns `ok`. Errors are one line, for example `HTTP 404: Unknown Message`. Custom emoji are `name:id`. The guild check applies as for any write.
+MCP: `react {"bot": "alice_bot", "guild_id": "<guild>", "channel_id": "<ch>", "message_id": "<msg>", "emoji": "👍"}` returns `ok`. Errors are one line, for example `HTTP 404: Unknown Message`. Custom emoji are `name:id`. The optional guild check applies as for any write.
 
 ## CLI agent
 
@@ -89,7 +89,7 @@ You can also leave an agent running and have it poll the inbox file.
 
 ## Agent that already has an HTTP hook
 
-Untested. Point `WEBHOOK_URL` at that hook. Give the agent `examples/agent_post.py` (guild-pinned) as the reply tool. Raw curl calls skip guild pinning. If the agent only reads files, use the HTTP receiver and point it at the inbox.
+Untested. Point `WEBHOOK_URL` at that hook. Give the agent `examples/agent_post.py` as the reply tool. It has the optional guild check; raw curl calls do not. If the agent only reads files, use the HTTP receiver and point it at the inbox.
 
 ## Precise Responding
 

@@ -1,6 +1,6 @@
 # fluxer-agent-bridge
 
-Fluxer bot accounts run in Docker. Each bot forwards the events it can see to an HTTPS webhook. Your agent replies as that bot with `bin/fluxer`, MCP, or `bin/post.sh`. Each of those is pinned to the server of the message it answers. The bot's Fluxer presence is the bridge's health.
+Fluxer bot accounts run in Docker. Each bot forwards the events it can see to an HTTPS webhook. Your agent replies as that bot with `bin/fluxer`, MCP, or `bin/post.sh`. Each can optionally check that a write lands in the server you name. The bot's Fluxer presence is the bridge's health.
 
 One image. One container per owner. Any number of bots in that container. The host publishes no ports. Each container dials your Fluxer gateway and the owner's webhook.
 

@@ -1,14 +1,17 @@
 /**
- * Guild pinning for writes (fail closed). A write must name the context it answers: a guild id, or DM.
- * The target channel is resolved first (GET /channels/{id}); a thread inherits its guild (guild_id, else its parent's).
- * Anything unknown, mismatched, or missing is refused before any write is made.
+ * Optional guild check for writes. Without a context a write is not checked (cross-server posts are legitimate).
+ * With a context (a guild id, or DM) the target channel is resolved first (GET /channels/{id}; a thread inherits its
+ * guild) and anything unknown or mismatched is refused before any write. Strict mode (FLUXER_REQUIRE_GUILD=1, or
+ * require_guild = true in the bot's bot.toml for `cli.js post`) also refuses a write with no context.
  */
 export type PostCtx = { guild: string } | { dm: true };
 const SNOWFLAKE = /^\d{5,25}$/;
 const DM_TYPES = new Set([1, 3]);
 
-/** guild "dm" is the same as dm = true, so a copied `guild` value from events always works. */
-export function parseCtx(guild?: string | null, dm?: boolean, envValue?: string | null): PostCtx | { error: string } {
+export const truthy = (v: unknown) => v === true || /^(1|true|yes|on)$/i.test(String(v ?? '').trim());
+
+/** null = no context, so no check. guild "dm" is the same as dm = true, so a copied `guild` value always works. */
+export function parseCtx(guild?: string | null, dm?: boolean, envValue?: string | null, strict = false): PostCtx | null | { error: string } {
   let g = (guild ?? '').trim();
   if (g.toLowerCase() === 'dm') { g = ''; dm = true; }
   if (g && dm) return { error: 'refused: pass --guild or --dm, not both' };
@@ -16,7 +19,7 @@ export function parseCtx(guild?: string | null, dm?: boolean, envValue?: string 
   if (g) return SNOWFLAKE.test(g) ? { guild: g } : { error: `refused: bad guild id ${g}` };
   const e = (envValue ?? '').trim();
   if (e) return parseCtx(e, false, null);
-  return { error: 'refused: no context guild (pass --guild ID or --dm)' };
+  return strict ? { error: 'refused: no context guild (strict mode; pass --guild ID or --dm)' } : null;
 }
 
 /** null = allowed; otherwise a short refusal. `ch` null/undefined means the channel could not be resolved. */

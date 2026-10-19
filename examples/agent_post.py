@@ -2,10 +2,12 @@
 """agent_post.py: minimal REST helper for an agent that replies as its Fluxer bot (stdlib only).
 
 Library:  from agent_post import api, reply, GuildRefused
-          reply(channel_id, "text", reply_to=message_id, guild=batch_msg["guild_id"])   # or dm=True
+          reply(channel_id, "text", reply_to=message_id)                                # no guild check
+          reply(channel_id, "text", reply_to=message_id, guild=batch_msg["guild_id"])   # asserts the server (or dm=True)
           api("GET", f"/channels/{cid}/messages?limit=5")
-CLI:      agent_post.py (--guild <id> | --dm) send <channel_id> <text...> [--reply-to <message_id>]
-Writes are guild-pinned: the channel must be in that guild (or a DM for dm), else GuildRefused / exit 3, nothing sent.
+CLI:      agent_post.py [--guild <id> | --dm] send <channel_id> <text...> [--reply-to <message_id>]
+Optional guild check: with guild/dm the channel must be in that guild (or a DM), else GuildRefused / exit 3, nothing sent.
+FLUXER_REQUIRE_GUILD=1 makes the context mandatory (strict).
 
 Config (env vars, or an env file at $FLUXER_ENV, default ./bot.env):
   FLUXER_URL=https://your-fluxer.example    FLUXER_BOT_TOKEN=<app_id>.<secret>
@@ -31,11 +33,12 @@ TOKEN = ENV.get("FLUXER_BOT_TOKEN", "")
 CTX = ssl.create_default_context()
 _POST_RE = re.compile(r"^/channels/(\d+)/messages/?$")
 
-# --- guild pinning : a write may only land in the guild (or DM) it is answering -----------------------
-# Every non-GET call needs a context: api(..., guild="<payload guild_id>") or api(..., dm=True) (guild="dm" works too),
-# else env FLUXER_CONTEXT_GUILD=<id>|dm. The target channel is resolved first (GET /channels/{id}, cached 60 s; threads
-# inherit their guild). Another guild, a non-DM for dm, an unknown channel, or no context raises GuildRefused BEFORE any
-# write. It raises (never returns quietly), so a refused post is always visible to the caller.
+# --- optional guild check (Oct 19 2026) ------------------------------------------------------------------------------
+# Default: a write with no guild context is not checked (cross-server posts are legitimate). Passing a context asserts
+# where the write lands: api(..., guild="<id>") / dm=True (guild="dm" works too), or env FLUXER_CONTEXT_GUILD=<id>|dm.
+# The target channel is then resolved (GET /channels/{id}, cached 60 s; threads inherit their guild) and another guild,
+# a non-DM for dm, or an unknown channel raises GuildRefused BEFORE any write. Strict mode, FLUXER_REQUIRE_GUILD=1,
+# also refuses a write with no context. Refusals raise (never return quietly), so they are always visible.
 class GuildRefused(Exception):
     """A write was refused before anything was sent."""
 
@@ -62,11 +65,15 @@ def _context(guild=None,dm=False):
         return ("guild",g)
     env=os.environ.get("FLUXER_CONTEXT_GUILD","").strip()
     if env: return _context(env)
-    raise GuildRefused("refused: no context guild (pass guild=<payload guild_id> or dm=True; CLI: --guild ID or --dm)")
+    if os.environ.get("FLUXER_REQUIRE_GUILD","").strip().lower() in ("1","true","yes","on"):
+        raise GuildRefused("refused: no context guild (strict mode; pass guild=<payload guild_id> or dm=True; CLI: --guild ID or --dm)")
+    return None
 
 def check_target(channel_id,guild=None,dm=False):
-    """Return the matching guild id (or "dm"); raise GuildRefused otherwise. Reads only."""
-    kind,want=_context(guild,dm); cid=str(channel_id or "")
+    """Return the matching guild id, "dm", or None when there is no context (no check). Raise GuildRefused on a mismatch."""
+    ctx=_context(guild,dm)
+    if ctx is None: return None
+    kind,want=ctx; cid=str(channel_id or "")
     if not _SNOW.match(cid): raise GuildRefused(f"refused: bad channel id {cid}")
     ch=_get_channel(cid)
     if not ch: raise GuildRefused(f"refused: channel {cid} not resolvable")
@@ -80,6 +87,7 @@ def check_target(channel_id,guild=None,dm=False):
     return g
 
 def _guard_write(method,p,guild,dm):
+    if _context(guild,dm) is None: return  # default: no context, no check
     path=p.split("?",1)[0]
     if method.upper()=="POST" and path.rstrip("/")=="/users/@me/channels": return  # opening a DM channel posts nothing
     m=_CHAN_PATH.match(path)
@@ -87,7 +95,7 @@ def _guard_write(method,p,guild,dm):
     check_target(m.group(1),guild,dm)
 
 def signal_typing(channel_id, timeout=2.0, guild=None, dm=False, _checked=False):
-    """Universal Responding signal: the bot's own typing indicator. True on 2xx. Never raises. Guild-pinned like api()."""
+    """Universal Responding signal: the bot's own typing indicator. True on 2xx. Never raises. Optional guild check like api()."""
     if not _checked:
         try: check_target(channel_id, guild, dm)
         except GuildRefused as e: print(e, file=sys.stderr); return False
@@ -125,7 +133,7 @@ def _before_post(p, body):
 
 def api(method, p, body=None, guild=None, dm=False):
     """Call the Fluxer REST API as the bot. Returns parsed JSON, or {"_error": status, "_body": text}.
-    Writes need guild= or dm= (raises GuildRefused before sending otherwise)."""
+    Optional guild=/dm= on writes asserts the target; a mismatch raises GuildRefused before sending."""
     if method.upper() not in ("GET", "HEAD"): _guard_write(method, p, guild, dm)
     if method.upper() == "POST": _before_post(p, body)
     r = urllib.request.Request(BASE + p, method=method, data=json.dumps(body).encode() if body is not None else None,

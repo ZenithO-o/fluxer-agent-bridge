@@ -3,7 +3,7 @@
 
   fab-status.py responding [--message ID] [--channel ID] [--user ID] [--nick NICK]
   fab-status.py idle | show
-  fab-status.py typing <channel_id> --guild <id>|--dm   universal signal via the bot's own typing (needs agent_post.py config)
+  fab-status.py typing <channel_id> [--guild <id>|--dm]   universal signal via the bot's own typing (needs agent_post.py config)
 
 Env: BB_SSH=user@bridge-host (omit to run locally on the bridge host), BB_HOME=/path/to/fluxer-agent-bridge,
      BB_OWNER=<owner>, BB_BOT=<bot>. Runs `sudo $BB_HOME/bin/status.sh <owner> <bot> ...`.
@@ -18,7 +18,7 @@ def main():
     p.add_argument("--message", default=""); p.add_argument("--channel", default="")
     p.add_argument("--user", default=""); p.add_argument("--nick", default="")
     p.add_argument("--timeout", type=float, default=15)
-    p.add_argument("--guild", default=None); p.add_argument("--dm", action="store_true")  # typing is a guild-pinned write
+    p.add_argument("--guild", default=None); p.add_argument("--dm", action="store_true")  # optional guild check for typing
     a = p.parse_args()
     if a.state == "typing":
         sys.path.insert(0, os.path.dirname(os.path.abspath(__file__))); import agent_post  # noqa

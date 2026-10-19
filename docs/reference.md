@@ -32,7 +32,7 @@ Run these with sudo on the bridge host. Settings come from `bridge.env`.
 | `reload.sh <owner>` | SIGHUP to PID 1 through `docker exec`. Restarts a bot only when its config hash changed |
 | `status.sh <owner> <bot> …` | Drive activity status. See below |
 | `test-webhook.sh <owner> <bot>` | One synthetic POST from `cli.js`. Not a live batch, and nothing is posted in Fluxer |
-| `post.sh <owner> <bot> (--guild ID \| --dm) [--reply-to ID] [--dry-run] <channel> <text…\|->` | Guild-pinned post with the token inside the container. Types first, prints the new id. Exit 3 = refused, nothing written. See [Guild pinning](#guild-pinning) |
+| `post.sh <owner> <bot> [--guild ID \| --dm] [--reply-to ID] [--dry-run] <channel> <text…\|->` | Post with the token inside the container, with an optional guild check. Types first, prints the new id. Exit 3 = refused, nothing written. See [Guild check](#guild-check-optional) |
 | `drill-reconnect.sh <owner>` | Drop the gateway socket with no close frame. Expect `RESUMED` |
 | `remove-bot.sh <owner> <bot>` | Move that bot's directory to `backup/` and send SIGHUP. The `owners.conf` row and the container stay |
 | `render-compose.sh` | Rewrite `compose.yml` from `owners.conf` |
@@ -244,7 +244,7 @@ Up to 50 items and 512 KiB per POST, about every 3 seconds while the outbox has 
 
 ## How an agent replies
 
-Do not build the REST body. `bin/fluxer --bot <name>` types, then posts, and it URL-encodes reactions. A missing bot name is an error. The token is in `~/.config/fluxer-agent-bridge/bots/<name>.env`. That URL name is not `FLUXER_INSTANCE`. `FLUXER_INSTANCE` is only the bridge host file. Every write takes the guild of the message it answers (`--guild "$GUILD"` from the payload's `guild_id`, or `--dm`).
+Do not build the REST body. `bin/fluxer --bot <name>` types, then posts, and it URL-encodes reactions. A missing bot name is an error. The token is in `~/.config/fluxer-agent-bridge/bots/<name>.env`. That URL name is not `FLUXER_INSTANCE`. `FLUXER_INSTANCE` is only the bridge host file. `--guild "$GUILD"` (the payload's `guild_id`) or `--dm` is optional. It asserts that the write lands in that server, as below.
 
 ```sh
 bin/fluxer --bot alice_bot --guild "$GUILD" send "$CHANNEL" "On it!"
@@ -255,18 +255,20 @@ bin/fluxer --bot alice_bot --guild "$GUILD" edit "$CHANNEL" "$MSG" "Updated."
 bin/fluxer --bot alice_bot --guild "$GUILD" delete "$CHANNEL" "$MSG"
 ```
 
-### Guild pinning
+### Guild check (optional)
 
-A bot may only write into the server (or DM) of the message it is answering. Every posting path in this repo enforces it, fail closed:
+Cross-server posting is allowed. By default a write is not checked. Naming a context turns the check on for that write, as an assertion about where it lands. Strict mode makes a context mandatory.
 
-| Path | Context | Refusal |
-|---|---|---|
-| `bin/fluxer` / `mcp/fluxer.py` CLI | `--guild <id>` or `--dm` before the command, else `FLUXER_CONTEXT_GUILD=<id>\|dm` | stderr `refused: …`, exit 3 |
-| `mcp/fluxer.py` MCP tools `typing send reply react unreact edit delete` | `guild_id` (string) or `dm` (boolean), else `FLUXER_CONTEXT_GUILD` | `isError: true`, text `refused: …` |
-| `examples/agent_post.py` | `api(..., guild=…)`, `reply(..., guild=…)` or `dm=True`, CLI `--guild` / `--dm` | raises `GuildRefused`; CLI exit 3 |
-| `cli.js post` / `bin/post.sh` (inside the container, bot's own token) | `--guild <id>` or `--dm` | stderr, exit 3 |
+| Path | Context (opt-in) | Strict mode | Refusal |
+|---|---|---|---|
+| `bin/fluxer` / `mcp/fluxer.py` CLI | `--guild <id>` or `--dm` before the command, else `FLUXER_CONTEXT_GUILD=<id>\|dm` | `FLUXER_REQUIRE_GUILD=1` | stderr `refused: …`, exit 3 |
+| `mcp/fluxer.py` MCP write tools `typing send reply react unreact edit delete` | `guild_id` (string) or `dm` (boolean), else `FLUXER_CONTEXT_GUILD` | `FLUXER_REQUIRE_GUILD=1` in the server's env | `isError: true`, text `refused: …` |
+| `examples/agent_post.py` | `api(..., guild=…)`, `reply(..., guild=…)` or `dm=True`, CLI `--guild` / `--dm` | `FLUXER_REQUIRE_GUILD=1` | raises `GuildRefused`; CLI exit 3 |
+| `cli.js post` / `bin/post.sh` (inside the container, bot's own token) | `--guild <id>` or `--dm` | `require_guild = true` at the top of that bot's `bot.toml` (or `FLUXER_REQUIRE_GUILD=1` in the container env) | stderr, exit 3 |
 
-The target channel is resolved first with a read (`GET /channels/{id}`, cached for 60 s; a thread uses its `guild_id`, or its parent's). The write is refused, without being sent, when the channel is in another guild, when `--dm` is given and it is not a DM, when it cannot be resolved, when both or neither of guild and DM are given, or when the guild id is malformed. `--guild dm` is the same as `--dm`. `--dry-run` runs the check and stops. `events` adds a ready-to-copy `guild` (an id, `"dm"`, or a list when one batch spans several) to each inbox event.
+With a context, the target channel is resolved first with a read (`GET /channels/{id}`, cached for 60 s; a thread uses its `guild_id`, or its parent's). The write is refused, without being sent, when the channel is in another guild, when `--dm` is given and it is not a DM, when it cannot be resolved, when both guild and DM are given, or when the guild id is malformed. Without a context nothing is resolved and the write goes through, unless strict mode is on: then it is refused. `--guild dm` is the same as `--dm`. `--dry-run` runs the check (or reports `no guild check`) and stops. `events` adds a ready-to-copy `guild` (an id, `"dm"`, or a list when one batch spans several) to each inbox event.
+
+To post into another server on purpose, either omit the context or pass the target channel's guild. Do not pass the inbound message's guild: that assertion would be refused.
 
 `bin/post.sh` is for posters that reach the bridge host over SSH and should not hold a token. `-` reads the text from stdin, which avoids quoting through ssh:
 
@@ -274,7 +276,7 @@ The target channel is resolved first with a read (`GET /channels/{id}`, cached f
 printf '%s' "$TEXT" | ssh bridge-host sudo /opt/fluxer-agent-bridge/bin/post.sh alice alice_bot --guild "$GUILD" --reply-to "$MSG" "$CHANNEL" -
 ```
 
-**Caveat.** This guards the tools, not the token. Anyone holding a raw bot token can call the REST API directly and post anywhere that bot can see. The full fix is on the roadmap: post only through the bridge (`post.sh`, or a future control endpoint), and remove bot tokens from agent machines.
+**Caveat.** This checks the tools, not the token. Anyone holding a raw bot token can call the REST API directly and post anywhere that bot can see. The full fix is on the roadmap: post only through the bridge (`post.sh`, or a future control endpoint), and remove bot tokens from agent machines.
 
 `react` and `unreact` print `ok`, or one line such as `HTTP 404: Unknown Message`. In MCP they return the text `ok`. `send` and `reply` call typing first. That is what the bridge treats as Responding, unless you use `status.sh`. The bridge then sees the bot's own `MESSAGE_CREATE` and can show Responded.
 

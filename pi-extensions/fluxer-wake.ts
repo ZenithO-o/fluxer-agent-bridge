@@ -14,7 +14,7 @@ function lineOf(message: Record<string, unknown>): string {
 	const author = (message.author as { display_name?: string; username?: string } | undefined) || {};
 	const who = author.display_name || author.username || "someone";
 	const where = message.channel_name || message.channel_id || "unknown";
-	// guild is what writes must pass (guild_id, or dm=true); the fluxer tools refuse any other server.
+	// guild to pass as guild_id (or dm=true) to assert a reply stays in this server; optional.
 	const guild = message.guild_id || (message.is_dm ? "dm" : "unknown");
 	return `${who} in #${where} (${message.reason}) message ${message.id} channel ${message.channel_id} guild ${guild}: ${message.content ?? ""}`;
 }

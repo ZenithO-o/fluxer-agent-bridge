@@ -5,11 +5,12 @@ Stdout is MCP only for `mcp`. Logs go to stderr. Tokens are never printed.
 `--bot <name>` is required. The token is ~/.config/fluxer-agent-bridge/bots/<name>.env.
 `bin/fluxer` is this file. `listen` writes $FLUXER_INBOX. A container cannot dial 127.0.0.1.
 
-Writes are pinned to a context guild (fail closed): pass --guild <id> or --dm (MCP: guild_id or dm), or set
-FLUXER_CONTEXT_GUILD=<id>|dm. The target channel is resolved first; another guild, a non-DM for --dm, an unknown
-channel, or no context at all is refused (exit 3) before any write. `events` gives each event a ready-to-copy `guild`.
+Optional guild check: pass --guild <id> or --dm (MCP: guild_id or dm), or set FLUXER_CONTEXT_GUILD=<id>|dm, and the
+target channel is resolved first; another guild, a non-DM for --dm, or an unknown channel is refused (exit 3) before
+any write. With no context the write is not checked, unless FLUXER_REQUIRE_GUILD=1 (strict: no context is refused).
+`events` gives each event a ready-to-copy `guild`.
 
-  bin/fluxer --bot <name> --guild <id>|--dm [--dry-run] send <ch> <text...> [--reply-to <msg>]
+  bin/fluxer --bot <name> [--guild <id>|--dm] [--dry-run] send <ch> <text...> [--reply-to <msg>]
   ... reply <ch> <msg> <text...> | react|unreact <ch> <msg> <emoji> | edit <ch> <msg> <text...> | delete <ch> <msg> | typing <ch>
   bin/fluxer --bot <name> whoami | channels | events [--cursor N] [--wait-ms MS]
   bin/fluxer bots | mcp | listen | selftest
@@ -140,7 +141,7 @@ def api(method, path, body=None, timeout=30, empty=False):
         return {"_error": 0, "_body": redact(exc)}
 
 
-# ---------- guild pinning (fail closed) ----------
+# ---------- optional guild check (strict with FLUXER_REQUIRE_GUILD=1) ----------
 SNOWFLAKE = re.compile(r"^\d{5,25}$")
 DM_TYPES = {1, 3}
 CHAN_CACHE = {}
@@ -151,8 +152,12 @@ class Refused(Exception):
     pass
 
 
+def strict_mode():
+    return str(cfg("FLUXER_REQUIRE_GUILD") or "").strip().lower() in ("1", "true", "yes", "on")
+
+
 def parse_ctx(guild=None, dm=False):
-    """('guild', id) or ('dm', None). Explicit beats FLUXER_CONTEXT_GUILD. guild "dm" equals dm."""
+    """('guild', id), ('dm', None), or None (no check). Explicit beats FLUXER_CONTEXT_GUILD. guild "dm" equals dm."""
     g = str(guild or "").strip()
     if g.lower() == "dm":
         g, dm = "", True
@@ -167,7 +172,9 @@ def parse_ctx(guild=None, dm=False):
     env = str(cfg("FLUXER_CONTEXT_GUILD") or "").strip()
     if env:
         return parse_ctx(env, False) if env.lower() != "dm" else ("dm", None)
-    raise Refused("refused: no context guild (pass --guild ID or --dm)")
+    if strict_mode():
+        raise Refused("refused: no context guild (strict mode; pass --guild ID or --dm)")
+    return None
 
 
 def get_channel(channel_id):
@@ -182,7 +189,9 @@ def get_channel(channel_id):
 
 
 def check_target(channel_id, ctx):
-    """Raise Refused unless channel_id is inside ctx. Reads only."""
+    """Raise Refused unless channel_id is inside ctx. Reads only. ctx None = no check (returns None)."""
+    if ctx is None:
+        return None
     channel_id = str(channel_id or "")
     if not SNOWFLAKE.match(channel_id):
         raise Refused(f"refused: bad channel id {channel_id}")
@@ -508,7 +517,7 @@ def handle(msg):
             "protocolVersion": version,
             "capabilities": {"tools": {}},
             "serverInfo": {"name": "fluxer", "version": "1.0.0"},
-            "instructions": "Pass bot. Writes need guild_id (copy the event's guild) or dm=true; other servers are refused. events returns raw batches.",
+            "instructions": "Pass bot. Optional guild_id (or dm=true) on writes asserts the target is in that server; a mismatch is refused. events returns raw batches.",
         })
     elif method == "ping":
         respond(msg_id, {})
@@ -632,7 +641,7 @@ def cli(argv):
             print(exc, file=sys.stderr)
             return 3
         if dry:
-            print(f"ok (dry run): {rest[0]} in {where}")
+            print(f"ok (dry run): {rest[0]} in {where}" if where else f"ok (dry run): {rest[0]} (no guild check)")
             return 0
     if cmd == "whoami":
         value = whoami()
@@ -675,7 +684,7 @@ def cli(argv):
 
 
 def guard_selftest():
-    """Guild pinning against a stub API: refusals never write, threads inherit their guild, DMs need dm."""
+    """Optional guild check against a stub API: refusals never write, threads inherit their guild, DMs need dm."""
     import subprocess, tempfile
     G, H = "100000000000000010", "100000000000000099"
     chans = {"2000000001": {"id": "2000000001", "type": 0, "guild_id": G}, "2000000002": {"id": "2000000002", "type": 0, "guild_id": H},
@@ -724,22 +733,31 @@ def guard_selftest():
                 assert want in str(exc), exc
         assert check_target("2000000003", ("guild", G)) == G
         assert check_target("2000000004", ("dm", None)) == "dm"
-        for bad in ((None, False), (G, True)):
-            try:
-                parse_ctx(*bad)
-                raise SystemExit("bad context accepted")
-            except Refused:
-                pass
+        assert parse_ctx() is None and check_target("2000000002", None) is None, "default: no context, no check"
+        try:
+            parse_ctx(G, True)
+            raise SystemExit("guild and dm together accepted")
+        except Refused:
+            pass
+        ENV["FLUXER_REQUIRE_GUILD"] = "1"
+        try:
+            parse_ctx()
+            raise SystemExit("strict mode accepted no context")
+        except Refused as exc:
+            assert "strict" in str(exc)
+        ENV["FLUXER_REQUIRE_GUILD"] = ""
         ENV["FLUXER_CONTEXT_GUILD"] = G
         assert parse_ctx() == ("guild", G) and parse_ctx("dm") == ("dm", None)
         assert not [x for x in seen if not x.startswith("GET ")], seen
         bots = tempfile.mkdtemp(prefix="fluxer-guard-")
         with open(os.path.join(bots, "g.env"), "w") as fh:
             fh.write(f"FLUXER_URL={ENV['FLUXER_URL']}\nFLUXER_BOT_TOKEN=stub\n")
-        env = dict(os.environ, FLUXER_BOTS_DIR=bots, FLUXER_ENV=os.path.join(bots, "none.env"), FLUXER_CONTEXT_GUILD="")
-        run = lambda *a: subprocess.run([sys.executable, os.path.abspath(__file__), "--bot", "g", *a], env=env, capture_output=True, text=True)
-        r = run("send", "2000000002", "hi")
-        assert r.returncode == 3 and "no context guild" in r.stderr, r
+        env = dict(os.environ, FLUXER_BOTS_DIR=bots, FLUXER_ENV=os.path.join(bots, "none.env"), FLUXER_CONTEXT_GUILD="", FLUXER_REQUIRE_GUILD="")
+        run = lambda *a, **extra: subprocess.run([sys.executable, os.path.abspath(__file__), "--bot", "g", *a], env=dict(env, **extra), capture_output=True, text=True)
+        r = run("--dry-run", "send", "2000000002", "hi")
+        assert r.returncode == 0 and "no guild check" in r.stdout, r
+        r = run("send", "2000000002", "hi", FLUXER_REQUIRE_GUILD="1")
+        assert r.returncode == 3 and "strict" in r.stderr, r
         r = run("--guild", G, "send", "2000000002", "hi")
         assert r.returncode == 3 and "is in guild" in r.stderr, r
         r = run("--guild", G, "--dry-run", "reply", "2000000001", "2000000099", "hi")
@@ -753,6 +771,8 @@ def guard_selftest():
         r = run("--guild", G, "react", "2000000001", "2000000099", "\U0001f44d")
         assert r.returncode == 0 and r.stdout == "ok\n", r
         assert seen[-1] == "PUT /api/v1/channels/2000000001/messages/2000000099/reactions/%F0%9F%91%8D/@me", seen
+        r = run("send", "2000000002", "cross-server on purpose")
+        assert r.returncode == 0 and seen[-1] == "POST /api/v1/channels/2000000002/messages", (r, seen)
         os.remove(os.path.join(bots, "g.env"))
         os.rmdir(bots)
         return 0
@@ -846,8 +866,8 @@ def selftest():
             raise SystemExit("unauthenticated post was accepted")
         except urllib.error.HTTPError as exc:
             assert exc.code == 401
-        refused = rpc({"jsonrpc": "2.0", "id": 5, "method": "tools/call", "params": {"name": "send", "arguments": {"bot": "selftest", "channel_id": "100000000000000030", "text": "x"}}})
-        assert refused["result"]["isError"] is True and "no context guild" in refused["result"]["content"][0]["text"], refused
+        refused = rpc({"jsonrpc": "2.0", "id": 5, "method": "tools/call", "params": {"name": "send", "arguments": {"bot": "selftest", "guild_id": "100000000000000010", "channel_id": "100000000000000030", "text": "x"}}})
+        assert refused["result"]["isError"] is True and "not resolvable" in refused["result"]["content"][0]["text"], refused
         props = [t for t in listed["result"]["tools"] if t["name"] == "send"][0]["inputSchema"]["properties"]
         assert "guild_id" in props and "dm" in props
         if guard_selftest() != 0:

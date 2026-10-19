@@ -10,7 +10,7 @@ import { execFile } from 'node:child_process';
 const G = '100000000000000010', H = '100000000000000099';
 const CH = { '2000000001': { id: '2000000001', type: 0, guild_id: G }, '2000000002': { id: '2000000002', type: 0, guild_id: H } };
 
-test('post: cross-guild refused before any write; dry run writes nothing; allowed post = typing then message', async () => {
+test('post: optional guard; mismatch and strict no-context refused before any write; dry run writes nothing', async () => {
   const seen = [];
   const srv = http.createServer((req, res) => {
     let b = ''; req.on('data', (c) => (b += c)); req.on('end', () => {
@@ -24,7 +24,7 @@ test('post: cross-guild refused before any write; dry run writes nothing; allowe
       res.writeHead(500).end();
     });
   });
-  await new Promise((r) => srv.listen(0, '127.0.0.1', r));
+  await new Promise((r) => srv.listen(0, '127.0.0.1', r)); srv.unref();
   const cfg = fs.mkdtempSync(path.join(os.tmpdir(), 'bbcfg-')); fs.mkdirSync(path.join(cfg, 'my_bot'));
   fs.writeFileSync(path.join(cfg, 'my_bot', 'secrets.env'), 'FLUXER_BOT_TOKEN=dummy.token-for-tests\n');
   const env = { ...process.env, BB_CFG_DIR: cfg, FLUXER_INSTANCE: `http://127.0.0.1:${srv.address().port}`, FLUXER_CONTEXT_GUILD: '' };
@@ -32,8 +32,16 @@ test('post: cross-guild refused before any write; dry run writes nothing; allowe
     { env: { ...env, ...extra } }, (err, stdout, stderr) => r({ code: err ? err.code : 0, stdout, stderr })));
   const writes = () => seen.filter((s) => s.startsWith('POST'));
 
-  let r = await cli(['2000000002', 'hi']);
-  assert.equal(r.code, 3); assert.match(r.stderr, /no context guild/);
+  let r = await cli(['--dry-run', '2000000002', 'hi']);
+  assert.equal(r.code, 0); assert.match(r.stdout, /no guild check/, 'default: no context, no check');
+  r = await cli(['2000000002', 'hi'], { FLUXER_REQUIRE_GUILD: '1' });
+  assert.equal(r.code, 3); assert.match(r.stderr, /no context guild \(strict/);
+  fs.writeFileSync(path.join(cfg, 'my_bot', 'bot.toml'), 'require_guild = true\n');
+  r = await cli(['2000000002', 'hi']);
+  assert.equal(r.code, 3, 'bot.toml require_guild = true is strict'); assert.match(r.stderr, /strict/);
+  r = await cli(['--guild', G, '--dry-run', '2000000001', 'hi']);
+  assert.equal(r.code, 0, 'strict with a matching guild passes');
+  fs.rmSync(path.join(cfg, 'my_bot', 'bot.toml'));
   r = await cli(['--guild', G, '2000000002', 'hi']);
   assert.equal(r.code, 3); assert.match(r.stderr, /is in guild 100000000000000099/);
   r = await cli(['--dm', '2000000001', 'hi']);
@@ -49,5 +57,9 @@ test('post: cross-guild refused before any write; dry run writes nothing; allowe
   assert.equal(r.code, 0); assert.equal(r.stdout.trim(), '3000000001');
   assert.deepEqual(writes(), ['POST /api/v1/channels/2000000001/typing', 'POST /api/v1/channels/2000000001/messages']);
   assert.ok(!r.stdout.includes('dummy') && !r.stderr.includes('dummy'), 'token never printed');
+  r = await cli(['2000000002', 'cross-server on purpose']);
+  assert.equal(r.code, 0, 'default mode: no context posts anywhere');
+  assert.deepEqual(writes().slice(-2), ['POST /api/v1/channels/2000000002/typing', 'POST /api/v1/channels/2000000002/messages']);
+  assert.equal(seen.filter((x) => x === 'GET /api/v1/channels/2000000002').length, 2, 'unchecked post does not resolve the channel');
   srv.close();
 });

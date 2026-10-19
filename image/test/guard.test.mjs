@@ -8,8 +8,10 @@ const chans = { '1000000001': { id: '1000000001', type: 0, guild_id: G }, '10000
   '1000000003': { id: '1000000003', type: 1 }, '1000000004': { id: '1000000004', type: 11, guild_id: H, parent_id: '1000000009' } };
 const calls = []; const get = async (p) => { calls.push(p); const c = chans[p.split('/').pop()]; if (!c) throw new Error('404'); return c; };
 
-test('parseCtx: no context refuses; dm and guild are exclusive; env is a fallback; "dm" copies', () => {
-  assert.match(parseCtx(undefined, false, undefined).error, /no context guild/);
+test('parseCtx: no context = no check (strict refuses); dm and guild are exclusive; env is a fallback; "dm" copies', () => {
+  assert.equal(parseCtx(undefined, false, undefined), null);
+  assert.match(parseCtx(undefined, false, undefined, true).error, /no context guild \(strict/);
+  assert.deepEqual(parseCtx(undefined, false, G, true), { guild: G }, 'env context satisfies strict');
   assert.match(parseCtx(G, true).error, /not both/);
   assert.match(parseCtx('abc').error, /bad guild/);
   assert.deepEqual(parseCtx(undefined, false, G), { guild: G });
