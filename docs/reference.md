@@ -36,7 +36,7 @@ Run these with sudo on the bridge host. Settings come from `bridge.env`.
 | `remove-bot.sh <owner> <bot>` | Move that bot's directory to `backup/` and send SIGHUP. The `owners.conf` row and the container stay |
 | `render-compose.sh` | Rewrite `compose.yml` from `owners.conf` |
 
-`bridge.env` sets `FLUXER_INSTANCE`. Optional `BB_PREFIX` defaults to `fab`, so the container is `fab-<owner>`. Optional `BB_IMAGE` defaults to `fluxer-agent-bridge:local`.
+`bridge.env` sets `FLUXER_INSTANCE`. Optional `BB_PREFIX` defaults to `fab`, so the container is `fab-<owner>`. Optional `BB_IMAGE` defaults to `fluxer-agent-bridge:local`. Optional `BB_COMPOSE_PROJECT` defaults to `fluxer-agent-bridge`. When upgrading a host whose containers were created under another compose project, set it to that project's name. Otherwise `docker compose up` fails because the container names are already in use.
 
 Do not signal these containers with `docker kill -s`. Docker then treats them as manually stopped, and `restart: unless-stopped` will not revive them. `reload.sh` and `drill-reconnect.sh` signal PID 1 through `docker exec`.
 
