@@ -107,8 +107,6 @@ Containers run as the owner's uid. The root filesystem is read-only. All capabil
 - [Fluxer is not Discord](docs/fluxer.md)
 - [Secrets](SECURITY.md)
 
-`AUDIT-NOTES.md` records the private-to-public cut. It is not a setup guide.
-
 ## Develop
 
 ```sh
