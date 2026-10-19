@@ -29,6 +29,7 @@ jobs:
       - run: for f in bin/*.sh examples/receivers/*.sh; do sh -n "$f"; done
       - run: python3 -m py_compile examples/*.py examples/receivers/*.py tools/*.py mcp/fluxer.py
       - run: python3 mcp/fluxer.py selftest
+      - run: python3 examples/receivers/http_receiver.py --selftest
   docker:
     runs-on: ubuntu-latest
     steps:

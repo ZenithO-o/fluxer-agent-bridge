@@ -2,6 +2,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { CFG_DIR, INSTANCE, OWNER, parseEnvFile } from './config.js';
+import { trustBlock } from './untrusted.js';
 import { guard, parseCtx, truthy } from './guard.js';
 import { parse as parseToml } from 'smol-toml';
 
@@ -53,6 +54,7 @@ if (cmd === 'health') {
     target: arg,
     test: true,
     synthetic: true,
+    trust: trustBlock(false),
     messages: [{
       event: 'create',
       id: '0',

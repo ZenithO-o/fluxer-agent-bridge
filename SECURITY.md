@@ -24,4 +24,4 @@ There is no encrypted secret store and no per-owner access control beyond the fi
 
 ## Webhook receivers
 
-Verify `Authorization` in constant time. Use HTTPS, or a private network. De-duplicate on `Idempotency-Key`. Treat message content as untrusted chat text. It can contain a prompt aimed at your agent.
+Verify `Authorization` in constant time. Use HTTPS, or a private network. De-duplicate on `Idempotency-Key`. Treat message content as untrusted chat text. It can contain a prompt aimed at your agent. So can names, channel and thread names, filenames, and emoji and tag names: every POST lists them in `trust.untrusted_paths`, and `trust_wrap = true` wraps them in `«fluxer:u»…«/fluxer:u»`. Route only on ids, `event` and `reason`. Refuse to run without a token, and reject bodies that are not JSON objects. See [Untrusted content](docs/reference.md#untrusted-content) and the prompt text in [agents.md](docs/agents.md#untrusted-chat-text).

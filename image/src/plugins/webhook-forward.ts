@@ -3,6 +3,7 @@ import crypto from 'node:crypto';
 import { definePlugin } from '../plugin.js';
 import { JsonKV } from '../store.js';
 import { appliedTags } from './tags.js';
+import { trustBlock, wrapItem } from '../untrusted.js';
 import { BoundedMap, GATEWAY_EVENTS, MODES, THREAD_TYPES, decideDelete, decideEvent, decideMessage, nickOf, parseEvents, parseIgnore, toIdSet,
   type EventKind, type FilterOpts, type Mode, type Reason } from './forward-filter.js';
 
@@ -12,6 +13,8 @@ import { BoundedMap, GATEWAY_EVENTS, MODES, THREAD_TYPES, decideDelete, decideEv
  * or legacy WEBHOOK_KEY (sent as "Bearer <key>" plus X-Automation-Key).
  * Without WEBHOOK_URL (or with hold = true) messages are queued in the bounded outbox, not sent.
  * Filtering lives in forward-filter.ts (mode "all" is the default: every visible message except the bot's own).
+ * Every POST carries a `trust` block naming the untrusted text fields; trust_wrap = true (default off) also wraps them
+ * in place as «fluxer:u»…«/fluxer:u» (see untrusted.ts). The outbox always stores raw values.
  */
 interface Item { [k: string]: unknown; id: string }
 interface OutboxState { [k: string]: unknown; items: Item[]; dropped: number }
@@ -40,7 +43,7 @@ export default definePlugin({
     if (eventKinds.has('typing') && (ctx.bot.config.ignored_events ?? []).includes('TYPING_START'))
       ctx.log.warn('events includes "typing" but ignored_events has TYPING_START; remove it there to receive typing');
     const includeBackfill = bool(c.include_backfill, true), everyoneIsPing = bool(c.everyone_is_ping, false);
-    const hold = bool(c.hold, false), testFlag = bool(c.test, false);
+    const hold = bool(c.hold, false), testFlag = bool(c.test, false), trustWrap = bool(c.trust_wrap, false);
     const batchMs = num(c.batch_seconds, 3) * 1000, maxPerPost = num(c.max_per_post, 50), outboxMax = num(c.outbox_max, 500);
     const backfillMax = num(c.backfill_max, 50), maxPostBytes = num(c.max_post_bytes, 512 * 1024);
     const url = ctx.secrets.WEBHOOK_URL || '';
@@ -286,7 +289,7 @@ export default definePlugin({
     async function post(batch: Item[], extra: Record<string, unknown> = {}): Promise<{ ok: boolean; status: number; permanent: boolean }> {
       const body = JSON.stringify({
         source: 'fluxer-agent-bridge', schema: 2, owner: ctx.bot.owner, bot: ctx.bot.name, target: ctx.bot.name, test: testFlag,
-        messages: batch, ...(outbox.data.dropped ? { dropped_due_to_backlog: outbox.data.dropped } : {}), ...extra,
+        trust: trustBlock(trustWrap), messages: trustWrap ? batch.map(wrapItem) : batch, ...(outbox.data.dropped ? { dropped_due_to_backlog: outbox.data.dropped } : {}), ...extra,
       });
       const headers: Record<string, string> = { 'Content-Type': 'application/json', 'User-Agent': 'fluxer-agent-bridge/1.0',
         'Idempotency-Key': crypto.createHash('sha256').update(batch.map((b) => `${b.event}:${b.id}`).join(',') + (extra.test ? ':test' : '')).digest('hex').slice(0, 32) };
@@ -307,7 +310,7 @@ export default definePlugin({
         // whole-guild forwarding: cap each POST by count and by size (one oversized message still goes alone)
         const batch: Item[] = []; let bytes = 0;
         for (const it of outbox.data.items.slice(0, maxPerPost)) {
-          const n = Buffer.byteLength(JSON.stringify(it));
+          const n = Buffer.byteLength(JSON.stringify(trustWrap ? wrapItem(it) : it));
           if (batch.length && bytes + n > maxPostBytes) break;
           batch.push(it); bytes += n;
         }

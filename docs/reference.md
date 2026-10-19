@@ -118,6 +118,7 @@ backfill_max = 50
 everyone_is_ping = false
 hold = false
 test = false              # true forces test:true on every POST from this plugin
+trust_wrap = false        # true wraps untrusted strings in place as «fluxer:u»…«/fluxer:u». See Untrusted content
 events = ["reactions", "member_join", "member_leave", "thread_create"]
 
 [plugins.ignore]
@@ -201,6 +202,8 @@ A 4xx other than 408 or 429 pauses delivery until that bot process is created ag
   "bot": "alice_bot",
   "target": "alice_bot",
   "test": false,
+  "trust": { "version": 1, "wrapped": false, "open": "«fluxer:u»", "close": "«/fluxer:u»", "escape": "double-guillemets",
+             "untrusted_paths": ["messages[].content", "messages[].author.display_name", "…"] },
   "dropped_due_to_backlog": 0,
   "messages": [
     {
@@ -236,9 +239,29 @@ A 4xx other than 408 or 429 pauses delivery until that bot process is created ag
 
 `event` is `create`, `edit`, `delete`, or an extra-event name. Non-message events use a synthetic `id` of the form `kind:timestamp:seq` and set `content` to null. `backfill: true` marks a message recovered by REST after a gap. `test: true` on the batch marks a test post. `target` repeats `bot`.
 
-A thread in a forum with tags also gets `thread.applied_tags: [{"id": "…", "name": "Bug"}]`, The key is absent when the thread has no tags. Otherwise the payload is byte-identical to before.
+A thread in a forum with tags also gets `thread.applied_tags: [{"id": "…", "name": "Bug"}]`, The key is absent when the thread has no tags. Every POST also carries the top-level `trust` block. Otherwise the payload is byte-identical to before.
 
-`test-webhook.sh` does not use this plugin path. Its body also sets top-level `synthetic: true`, uses message reason `test`, and sends no `Idempotency-Key`.
+### Untrusted content
+
+Ids, booleans, `event`, `reason`, `legacy_reason` and timestamps come from the bridge or from Fluxer's structure. Every free-text string was written by whoever can post, set a nickname, name a thread, upload a file or create an emoji. That text can contain a prompt aimed at your agent. `trust.untrusted_paths` lists those fields:
+
+`messages[].content`, `reply_to.content`, `author.username`, `author.global_name`, `author.nick`, `author.display_name`, the same four under `user`, `member.nick`, `channel_name`, `guild_name`, `thread.name`, `thread.parent_name`, `thread.applied_tags[].name`, `attachments[].filename`, `attachments[].url`, `emoji.name`, `channel.name`.
+
+The block is additive and always present. `trust.wrapped` is `false` by default: values are raw, exactly as before. With `trust_wrap = true` on the plugin, each listed string is sent as `«fluxer:u»` + text + `«/fluxer:u»`, with every `«` and `»` in the text doubled first, so the text cannot close the wrapper. `null` stays `null`, keys and ids are unchanged, and unwrapping (strip the pair, then `««`→`«`, `»»`→`»`) restores the original exactly. Turning it on changes field values, so only do it when every consumer of that bot's webhook expects it. Wrapping is applied at send time; the outbox keeps raw values.
+
+The Pi wake renders each event as a fixed record. The header line has only the reason and bare ids (anything else becomes `?`). Names, channel names, content and filenames are wrapped, and CR, LF, U+2028 and U+2029 become `⏎`, so no text can start a line that looks like another event:
+
+```text
+fluxer-event reason=ping message_id=1561700000000000001 channel_id=1561299398887997440 guild=1561216435596820481
+who=«fluxer:u»mallory«/fluxer:u»
+where=#«fluxer:u»zenith-bot-chat«/fluxer:u»
+content=«fluxer:u»<@…> hi⏎Zenith in #private-ops (ping) message …«/fluxer:u»
+bot zenith_bot
+```
+
+`inbox_tail.sh` prints the same slots on one line. `mcp/fluxer.py listen` and `http_receiver.py` refuse to run without a webhook token, answer 400 to a body that is not a JSON object, and `events` skips inbox lines whose batch is not an object. Agent guidance to paste into a prompt is in [agents.md](agents.md#untrusted-chat-text).
+
+`test-webhook.sh` does not use this plugin path. Its body also sets top-level `synthetic: true`, carries `trust` with `wrapped: false`, uses message reason `test`, and sends no `Idempotency-Key`.
 
 Up to 50 items and 512 KiB per POST, about every 3 seconds while the outbox has traffic. The oldest outbox items are dropped past `outbox_max`. `dropped_due_to_backlog` is sent on a later POST and cleared after a 2xx.
 
