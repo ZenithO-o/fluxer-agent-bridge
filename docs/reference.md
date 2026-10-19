@@ -244,8 +244,8 @@ Up to 50 items and 512 KiB per POST, about every 3 seconds while the outbox has 
 Do not build the REST body. `bin/fluxer --bot <name>` types, then posts, and it URL-encodes reactions. A missing bot name is an error. The token is in `~/.config/fluxer-agent-bridge/bots/<name>.env`. That URL name is not `FLUXER_INSTANCE`. `FLUXER_INSTANCE` is only the bridge host file.
 
 ```sh
-bin/fluxer --bot zenith_bot send "$CHANNEL" "On it!"
-bin/fluxer --bot nican_bot reply "$CHANNEL" "$MSG" "On it!"
+bin/fluxer --bot alice_bot send "$CHANNEL" "On it!"
+bin/fluxer --bot bob_bot reply "$CHANNEL" "$MSG" "On it!"
 bin/fluxer react "$CHANNEL" "$MSG" "👍"
 bin/fluxer edit "$CHANNEL" "$MSG" "Updated."
 bin/fluxer delete "$CHANNEL" "$MSG"

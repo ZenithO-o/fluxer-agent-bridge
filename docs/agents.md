@@ -45,11 +45,11 @@ One token file per bot, mode `0600`:
 The file has `FLUXER_URL` and `FLUXER_BOT_TOKEN`. `--bot <name>` is required. A missing name is an error.
 
 ```sh
-bin/fluxer --bot zenith_bot reply "$CHANNEL" "$MSG" "On it."
+bin/fluxer --bot alice_bot reply "$CHANNEL" "$MSG" "On it."
 python3 mcp/fluxer.py listen
 ```
 
-`listen` binds `127.0.0.1:8788`. A container cannot dial that address. Point `WEBHOOK_URL` there only when the bridge process is on this machine. A bot whose URL still points at a Grok routine does not wake this session.
+`listen` binds `127.0.0.1:8788`. A container cannot dial that address. Point `WEBHOOK_URL` there only when the bridge process is on this machine. A bot whose URL still points at a hosted webhook routine does not wake this session.
 
 ## CLI agent
 

@@ -100,7 +100,7 @@ def webhook_token():
 
 
 def api_base():
-    return cfg("FLUXER_URL", "https://chat.furry.dev").rstrip("/") + "/api/v1"
+    return cfg("FLUXER_URL", "https://your-fluxer.example").rstrip("/") + "/api/v1"
 
 
 def token():
