@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "fluxer": {
+      "command": "python3",
+      "args": ["mcp/fluxer.py", "mcp"],
+      "cwd": ".",
+      "description": "Read Fluxer batches and post as a named bot. A missing bot name is an error.",
+      "exposure": "direct",
+      "timeout": 45
+    }
+  }
+}

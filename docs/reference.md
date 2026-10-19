@@ -241,16 +241,16 @@ Up to 50 items and 512 KiB per POST, about every 3 seconds while the outbox has 
 
 ## How an agent replies
 
-Use the bot token as `Authorization: Bot <app_id>.<secret>`. The base URL is `https://<instance>/api/v1`.
+Do not build the REST body. `bin/fluxer --bot <name>` types, then posts, and it URL-encodes reactions. A missing bot name is an error. The token is in `~/.config/fluxer-agent-bridge/bots/<name>.env`. That URL name is not `FLUXER_INSTANCE`. `FLUXER_INSTANCE` is only the bridge host file.
 
 ```sh
-curl -sS -X POST -H "Authorization: Bot $TOKEN" -H "Content-Length: 0" \
-  "$FLUXER/api/v1/channels/$CHANNEL/typing"
-curl -sS -X POST -H "Authorization: Bot $TOKEN" -H "Content-Type: application/json" \
-  -d "{\"content\":\"On it!\",\"message_reference\":{\"message_id\":\"$MSG\",\"channel_id\":\"$CHANNEL\"}}" \
-  "$FLUXER/api/v1/channels/$CHANNEL/messages"
+bin/fluxer --bot zenith_bot send "$CHANNEL" "On it!"
+bin/fluxer --bot nican_bot reply "$CHANNEL" "$MSG" "On it!"
+bin/fluxer react "$CHANNEL" "$MSG" "👍"
+bin/fluxer edit "$CHANNEL" "$MSG" "Updated."
+bin/fluxer delete "$CHANNEL" "$MSG"
 ```
 
-The typing call is what the bridge treats as Responding, unless you use `status.sh`. The bridge then sees the bot's own `MESSAGE_CREATE` and can show Responded.
+`send` and `reply` call typing first. That is what the bridge treats as Responding, unless you use `status.sh`. The bridge then sees the bot's own `MESSAGE_CREATE` and can show Responded.
 
-`examples/agent_post.py` wraps those two calls. It reads `FLUXER_URL` and `FLUXER_BOT_TOKEN` from the environment or from `bot.env`. That URL name is not `FLUXER_INSTANCE`. `FLUXER_INSTANCE` is only the bridge host file.
+The underlying call is `Authorization: Bot <app_id>.<secret>` against `https://<instance>/api/v1`. `examples/agent_post.py` is the same two calls, if a program needs the library instead of the command.

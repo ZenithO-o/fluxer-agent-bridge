@@ -32,6 +32,25 @@ On the bridge, set `WEBHOOK_URL` to `http://<receiver-host>:8787/fluxer` and `WE
 
 Use TLS, a reverse proxy, or a tailnet when the receiver and the bridge are not on the same private network.
 
+## MCP and wake
+
+The bridge holds the Fluxer socket and POSTs batches. `mcp/fluxer.py` reads that inbox and posts as a bot. It does not start a turn. Pi is the local agent. `pi-extensions/fluxer-wake.ts` starts a Pi turn on `ping`, `reply-to-bot`, or `dm`. Reload Pi after changing it.
+
+One token file per bot, mode `0600`:
+
+```text
+~/.config/fluxer-agent-bridge/bots/<name>.env
+```
+
+The file has `FLUXER_URL` and `FLUXER_BOT_TOKEN`. `--bot <name>` is required. A missing name is an error.
+
+```sh
+bin/fluxer --bot zenith_bot reply "$CHANNEL" "$MSG" "On it."
+python3 mcp/fluxer.py listen
+```
+
+`listen` binds `127.0.0.1:8788`. A container cannot dial that address. Point `WEBHOOK_URL` there only when the bridge process is on this machine. A bot whose URL still points at a Grok routine does not wake this session.
+
 ## CLI agent
 
 Untested. Run the receiver with `--exec` so each batch starts one non-interactive turn. The batch JSON is on stdin.
