@@ -4,7 +4,7 @@
  * Reasons, highest priority first:
  *   "ping"         the bot is @-mentioned (user mention, one of its roles, or @everyone/@here if everyone_is_ping)
  *   "reply-to-bot" message_reference points at one of the bot's own messages
- *   "dm"           direct message (instance has DMs disabled today)
+ *   "dm"           direct message
  *   "home"         the channel (or a thread's parent) is in home_channels
  *   "all"          anything else, only in mode = "all"
  * Deletes have no mentions/author: they get "home" or "all" (never ping/reply).
@@ -170,7 +170,7 @@ export function parseEvents(v: unknown): { kinds: Set<EventKind>; unknown: strin
 }
 
 export interface EventInfo { channelId: string | null; parentId: string | null; guildId: string | null; actor: { id: string; bot: boolean } | null; toBot: boolean }
-/** Reason/ignore handling for non-message events. Returns reason "reaction-to-bot" for reactions on the bot's own messages. */
+/** Extra events ignore mode. A reaction on the bot's message is "reaction-to-bot". Other events aimed at the bot are "ping". */
 export function decideEvent(kind: EventKind, e: EventInfo, o: FilterOpts): { forward: true; reason: string } | { forward: false; why: string } {
   if (e.actor) {
     if (e.actor.id === o.selfId) return { forward: false, why: 'self' };

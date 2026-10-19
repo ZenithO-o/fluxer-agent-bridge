@@ -10,7 +10,7 @@
     "build": "tsc -p .",
     "start": "node dist/main.js",
     "typecheck": "tsc -p . --noEmit",
-    "test": "tsc -p . && node --test test/"
+    "test": "tsc -p . && node --test test/*.mjs"
   },
   "dependencies": {
     "@fluxerjs/core": "3.3.0",

@@ -6,7 +6,8 @@ Accepts the bridge's POSTs, checks the Authorization header, de-duplicates by Id
   * runs a command (--exec) with the batch JSON on stdin (e.g. a CLI agent: `claude -p ...`, a script, a queue push).
 Always answers 2xx once the batch is safely stored, so the bridge does not retry; a failing --exec does not lose data.
 
-  WEBHOOK_TOKEN=secret ./http_receiver.py --port 8787 --inbox ~/fluxer-inbox.jsonl
+  WEBHOOK_TOKEN=secret ./http_receiver.py --host 0.0.0.0 --port 8787 --inbox ~/fluxer-inbox.jsonl
+Default --host is 127.0.0.1. A bridge container cannot reach that address.
   WEBHOOK_TOKEN=secret ./http_receiver.py --exec './handle-batch.sh'
 
 Bridge side (secrets.env): WEBHOOK_URL=http://<this-host>:8787/fluxer   WEBHOOK_AUTH=Bearer secret

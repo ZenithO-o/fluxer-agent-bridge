@@ -27,7 +27,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: for f in bin/*.sh examples/receivers/*.sh; do sh -n "$f"; done
-      - run: python3 -m py_compile examples/*.py examples/receivers/*.py tools/*.py
+      - run: python3 -m py_compile examples/*.py examples/receivers/*.py tools/*.py mcp/fluxer.py
+      - run: python3 mcp/fluxer.py selftest
   docker:
     runs-on: ubuntu-latest
     steps:

@@ -1,0 +1,4 @@
+#!/bin/sh
+# Outbound Fluxer commands. Same program as mcp/fluxer.py.
+cd "$(dirname "$0")/.." || exit 1
+exec python3 mcp/fluxer.py "$@"
