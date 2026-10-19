@@ -6,13 +6,16 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 // ---- render: untrusted text is wrapped and newline-free (kept plain JS so image/test can run it) ----
 // Header line: bridge-derived routing only (reason, ids). Everything a Fluxer user wrote goes inside «fluxer:u»…«/fluxer:u»
-// with « and » doubled, and CR/LF/U+2028/U+2029 shown as ⏎, so no content can start a line that looks like a wake.
+// with « and » doubled, and CR, LF, U+2028, U+2029, U+0085 (NEL), VT and FF shown as ⏎, so no content can start a line that
+// looks like a wake. Bidi controls, zero-width characters, the BOM and C0 separators are shown as \u{XXXX} so they cannot
+// reorder or hide text. Display only: the forwarded JSON is untouched.
 const WAKE = new Set(["ping", "reply-to-bot", "dm"]);
 const OPEN = "\u00abfluxer:u\u00bb";
 const CLOSE = "\u00ab/fluxer:u\u00bb";
 
 const escapeUntrusted = (s) => String(s).replaceAll("\u00ab", "\u00ab\u00ab").replaceAll("\u00bb", "\u00bb\u00bb");
 const neutralizeNewlines = (s) => String(s).replace(/[\r\n\u2028\u2029\u0085\v\f]/g, "\u23ce");
+const showInvisible = (s) => String(s).replace(/[\u202a-\u202e\u2066-\u2069\u200b-\u200f\ufeff\u001c-\u001f]/g, (c) => `\\u{${c.charCodeAt(0).toString(16).toUpperCase().padStart(4, "0")}}`);
 const truncate = (s, n) => (s.length <= n ? s : s.slice(0, n) + `\u2026[truncated ${s.length} chars]`);
 const isWrapped = (s) => typeof s === "string" && s.length >= OPEN.length + CLOSE.length && s.startsWith(OPEN) && s.endsWith(CLOSE);
 const unwrap = (s) => s.slice(OPEN.length, s.length - CLOSE.length).replaceAll("\u00ab\u00ab", "\u00ab").replaceAll("\u00bb\u00bb", "\u00bb");
@@ -20,7 +23,7 @@ const unwrap = (s) => s.slice(OPEN.length, s.length - CLOSE.length).replaceAll("
 function slot(value, n, bridgeWrapped) {
 	let raw = String(value ?? "");
 	if (bridgeWrapped && isWrapped(raw)) raw = unwrap(raw);
-	return OPEN + escapeUntrusted(neutralizeNewlines(truncate(raw, n))) + CLOSE;
+	return OPEN + escapeUntrusted(showInvisible(neutralizeNewlines(truncate(raw, n)))) + CLOSE;
 }
 const bareId = (v) => (/^[0-9]{1,25}$/.test(String(v ?? "")) ? String(v) : "?");
 const bareWord = (v) => (/^[a-z0-9_-]{1,32}$/i.test(String(v ?? "")) ? String(v) : "?");

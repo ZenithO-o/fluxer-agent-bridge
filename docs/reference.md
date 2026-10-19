@@ -262,7 +262,7 @@ Ids, booleans, `event`, `reason`, `legacy_reason` and timestamps come from the b
 
 The block is additive and always present. `trust.wrapped` is `false` by default: values are raw, exactly as before. With `trust_wrap = true` on the plugin, each listed string is sent as `«fluxer:u»` + text + `«/fluxer:u»`, with every `«` and `»` in the text doubled first, so the text cannot close the wrapper. `null` stays `null`, keys and ids are unchanged, and unwrapping (strip the pair, then `««`→`«`, `»»`→`»`) restores the original exactly. Turning it on changes field values, so only do it when every consumer of that bot's webhook expects it. Wrapping is applied at send time; the outbox keeps raw values.
 
-The Pi wake renders each event as a fixed record. The header line has only the reason and bare ids (anything else becomes `?`). Names, channel names, content and filenames are wrapped, and CR, LF, U+2028 and U+2029 become `⏎`, so no text can start a line that looks like another event:
+The Pi wake renders each event as a fixed record. The header line has only the reason and bare ids (anything else becomes `?`). Names, channel names, content and filenames are wrapped. CR, LF, U+2028, U+2029, U+0085 (NEL), VT and FF become `⏎`, so no text can start a line that looks like another event. Bidi controls (U+202A–U+202E, U+2066–U+2069), zero-width characters (U+200B–U+200F), the BOM (U+FEFF) and C0 separators (U+001C–U+001F) are shown as `\u{XXXX}`, so they cannot reorder or hide text. This applies only to the wake text and `inbox_tail.sh`; the forwarded JSON keeps the original characters:
 
 ```text
 fluxer-event reason=ping message_id=1561700000000000001 channel_id=1561299398887997440 guild=1561216435596820481

@@ -145,3 +145,34 @@ test('V10: default (trust_wrap off) sends raw strings plus trust.wrapped = false
   assert.ok(bodies.every((b) => b.trust && b.trust.wrapped === false && b.trust.untrusted_paths.length === UNTRUSTED_PATHS.length));
   assert.ok(!JSON.stringify(bodies.map((b) => b.messages)).includes('fluxer:u'));
 });
+
+const INVISIBLE = ['\u202a', '\u202b', '\u202c', '\u202d', '\u202e', '\u2066', '\u2067', '\u2068', '\u2069', '\u200b', '\u200c', '\u200d', '\u200e', '\u200f', '\ufeff', '\u001c', '\u001d', '\u001e', '\u001f'];
+const shown = (c) => `\\u{${c.charCodeAt(0).toString(16).toUpperCase().padStart(4, '0')}}`;
+
+test('wake shows bidi, zero-width, BOM and C0 separators as \\u{XXXX} in every slot', { skip: !hasWake }, async () => {
+  const { render } = await loadWake();
+  const evil = `admin${INVISIBLE.join('')}\u202egnp.exe`;
+  const out = render({ bot: 'b', messages: [msg({ content: evil, channel_name: evil, author: { id: '1', display_name: evil }, attachments: [{ filename: evil }] })] }, new Set());
+  assertStructure(out, 1);
+  for (const c of INVISIBLE) assert.ok(!out.includes(c), `raw U+${c.charCodeAt(0).toString(16)} left in wake text`);
+  const expect = `admin${INVISIBLE.map(shown).join('')}\\u{202E}gnp.exe`;
+  for (const k of ['who=', 'where=#', 'content=', 'attachments=']) assert.ok(out.includes(`${k}${OPEN}${expect}${CLOSE}`), k);
+  assert.ok(out.includes('\\u{001C}') && out.includes('\\u{FEFF}'));
+});
+
+test('payload keeps invisible characters exactly (display escaping is wake-only)', () => {
+  const evil = `a${INVISIBLE.join('')}b`;
+  const w = wrapItem(msg({ content: evil }));
+  assert.equal(unwrapUntrusted(w.content), evil);
+  assert.equal(msg({ content: evil }).content, evil);
+});
+
+// docs must list exactly what the code maps to ⏎ and to \u{XXXX}
+const docsFile = process.env.DOCS_DIR ? path.join(process.env.DOCS_DIR, 'reference.md') : new URL('../../docs/reference.md', import.meta.url);
+test('docs match the wake neutralize sets', { skip: !hasWake || !fs.existsSync(docsFile) }, () => {
+  const src = fs.readFileSync(wakeFile, 'utf8'); const doc = fs.readFileSync(docsFile, 'utf8');
+  assert.ok(src.includes('replace(/[\\r\\n\\u2028\\u2029\\u0085\\v\\f]/g, "\\u23ce")'), 'newline set changed: update docs/reference.md');
+  assert.ok(doc.includes('CR, LF, U+2028, U+2029, U+0085 (NEL), VT and FF become `⏎`'));
+  assert.ok(src.includes('/[\\u202a-\\u202e\\u2066-\\u2069\\u200b-\\u200f\\ufeff\\u001c-\\u001f]/g'), 'invisible set changed: update docs/reference.md');
+  assert.ok(doc.includes('(U+202A–U+202E, U+2066–U+2069)') && doc.includes('(U+200B–U+200F)') && doc.includes('(U+FEFF)') && doc.includes('(U+001C–U+001F)'));
+});
