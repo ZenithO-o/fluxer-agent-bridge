@@ -1,7 +1,8 @@
 // Not the supervisor. main.ts is PID 1. Docker HEALTHCHECK and bin/*.sh call this file.
 import fs from 'node:fs';
 import path from 'node:path';
-import { CFG_DIR, OWNER, parseEnvFile } from './config.js';
+import { CFG_DIR, INSTANCE, OWNER, parseEnvFile } from './config.js';
+import { guard, parseCtx } from './guard.js';
 
 const PORT = Number(process.env.BB_HEALTH_PORT || 8080);
 const [cmd, arg] = process.argv.slice(2);
@@ -113,7 +114,55 @@ if (cmd === 'health') {
     console.error(`control endpoint unreachable: ${e.message}`);
     process.exit(1);
   });
+} else if (cmd === 'post' && arg && /^[a-z0-9_]{1,32}$/.test(arg)) {
+  post(arg, process.argv.slice(4)).then((code) => process.exit(code), (e) => { console.error(redact(String(e?.message ?? e))); process.exit(1); });
 } else {
-  console.error('usage: cli.js health | status | test-webhook <bot> | activity <bot> <responding|idle|show> [--user ID] [--nick NICK] [--channel ID] [--message ID] [--at MS]');
+  console.error('usage: cli.js health | status | test-webhook <bot> | activity <bot> <responding|idle|show> [--user ID] [--nick NICK] [--channel ID] [--message ID] [--at MS]\n'
+    + '       | post <bot> (--guild ID | --dm) [--reply-to ID] [--dry-run] <channel_id> <text...|->');
   process.exit(2);
+}
+
+/**
+ * Guarded post with the bot's own token (never printed). Resolves the channel, refuses a different guild before any
+ * write, sends typing, then the message. Prints the new message id. Exit 3 = refused, 2 = usage, 1 = API error.
+ */
+async function post(bot: string, argv: string[]): Promise<number> {
+  let guild: string | undefined, dm = false, replyTo: string | undefined, dry = false;
+  const rest: string[] = [];
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i];
+    if (a === '--guild') guild = argv[++i];
+    else if (a === '--dm') dm = true;
+    else if (a === '--reply-to') replyTo = argv[++i];
+    else if (a === '--dry-run') dry = true;
+    else rest.push(a);
+  }
+  const [channel, ...words] = rest;
+  let text = words.join(' ');
+  if (words.length === 1 && words[0] === '-') text = fs.readFileSync(0, 'utf8').replace(/\n$/, '');
+  if (!channel || (!text.trim() && !dry)) { console.error('usage: post <bot> (--guild ID | --dm) [--reply-to ID] [--dry-run] <channel_id> <text...|->'); return 2; }
+  if (replyTo && !/^\d{5,25}$/.test(replyTo)) { console.error(`bad --reply-to ${replyTo}`); return 2; }
+  const ctxv = parseCtx(guild, dm, process.env.FLUXER_CONTEXT_GUILD);
+  if ('error' in ctxv) { console.error(ctxv.error); return 3; }
+  const token = parseEnvFile(fs.readFileSync(path.join(CFG_DIR, bot, 'secrets.env'), 'utf8')).FLUXER_BOT_TOKEN;
+  if (!token) { console.error('FLUXER_BOT_TOKEN missing'); return 1; }
+  const disc: any = await (await fetch(`${INSTANCE.replace(/\/$/, '')}/.well-known/fluxer`, { signal: AbortSignal.timeout(10000) })).json();
+  const base = `${String(disc?.endpoints?.api ?? `${INSTANCE}/api`).replace(/\/$/, '')}/v1`;
+  const call = async (method: string, p: string, body?: unknown) => {
+    const r = await fetch(base + p, { method, signal: AbortSignal.timeout(20000),
+      headers: { Authorization: `Bot ${token}`, 'User-Agent': 'fluxer-agent-bridge/1.0', 'Content-Type': 'application/json' },
+      body: body === undefined ? undefined : JSON.stringify(body) });
+    const t = await r.text();
+    if (!r.ok) throw new Error(`HTTP ${r.status}: ${t.slice(0, 200)}`);
+    return t ? JSON.parse(t) : null;
+  };
+  const refusal = await guard((p) => call('GET', p), channel, ctxv);
+  if (refusal) { console.error(refusal); return 3; }
+  if (dry) { console.log(`ok (dry run): ${channel} matches ${'dm' in ctxv ? 'dm' : ctxv.guild}`); return 0; }
+  try { await call('POST', `/channels/${channel}/typing`, {}); } catch { /* best effort */ }
+  const body: Record<string, unknown> = { content: text, nonce: String(process.hrtime.bigint()).slice(-18) };
+  if (replyTo) body.message_reference = { message_id: replyTo, channel_id: channel };
+  const m: any = await call('POST', `/channels/${channel}/messages`, body);
+  console.log(m?.id ?? 'ok');
+  return 0;
 }

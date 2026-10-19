@@ -4,6 +4,15 @@
 Stdout is MCP only for `mcp`. Logs go to stderr. Tokens are never printed.
 `--bot <name>` is required. The token is ~/.config/fluxer-agent-bridge/bots/<name>.env.
 `bin/fluxer` is this file. `listen` writes $FLUXER_INBOX. A container cannot dial 127.0.0.1.
+
+Writes are pinned to a context guild (fail closed): pass --guild <id> or --dm (MCP: guild_id or dm), or set
+FLUXER_CONTEXT_GUILD=<id>|dm. The target channel is resolved first; another guild, a non-DM for --dm, an unknown
+channel, or no context at all is refused (exit 3) before any write. `events` gives each event a ready-to-copy `guild`.
+
+  bin/fluxer --bot <name> --guild <id>|--dm [--dry-run] send <ch> <text...> [--reply-to <msg>]
+  ... reply <ch> <msg> <text...> | react|unreact <ch> <msg> <emoji> | edit <ch> <msg> <text...> | delete <ch> <msg> | typing <ch>
+  bin/fluxer --bot <name> whoami | channels | events [--cursor N] [--wait-ms MS]
+  bin/fluxer bots | mcp | listen | selftest
 """
 
 import hmac, json, os, re, sys, threading, time, urllib.error, urllib.parse, urllib.request
@@ -131,6 +140,72 @@ def api(method, path, body=None, timeout=30, empty=False):
         return {"_error": 0, "_body": redact(exc)}
 
 
+# ---------- guild pinning (fail closed) ----------
+SNOWFLAKE = re.compile(r"^\d{5,25}$")
+DM_TYPES = {1, 3}
+CHAN_CACHE = {}
+CHAN_TTL = 60
+
+
+class Refused(Exception):
+    pass
+
+
+def parse_ctx(guild=None, dm=False):
+    """('guild', id) or ('dm', None). Explicit beats FLUXER_CONTEXT_GUILD. guild "dm" equals dm."""
+    g = str(guild or "").strip()
+    if g.lower() == "dm":
+        g, dm = "", True
+    if g and dm:
+        raise Refused("refused: pass guild or dm, not both")
+    if dm:
+        return ("dm", None)
+    if g:
+        if not SNOWFLAKE.match(g):
+            raise Refused(f"refused: bad guild id {g}")
+        return ("guild", g)
+    env = str(cfg("FLUXER_CONTEXT_GUILD") or "").strip()
+    if env:
+        return parse_ctx(env, False) if env.lower() != "dm" else ("dm", None)
+    raise Refused("refused: no context guild (pass --guild ID or --dm)")
+
+
+def get_channel(channel_id):
+    hit = CHAN_CACHE.get(channel_id)
+    if hit and time.time() - hit[0] < CHAN_TTL:
+        return hit[1]
+    ch = api("GET", f"/channels/{channel_id}")
+    if not isinstance(ch, dict) or "_error" in ch or "id" not in ch:
+        return None
+    CHAN_CACHE[channel_id] = (time.time(), ch)
+    return ch
+
+
+def check_target(channel_id, ctx):
+    """Raise Refused unless channel_id is inside ctx. Reads only."""
+    channel_id = str(channel_id or "")
+    if not SNOWFLAKE.match(channel_id):
+        raise Refused(f"refused: bad channel id {channel_id}")
+    ch = get_channel(channel_id)
+    if not ch:
+        raise Refused(f"refused: channel {channel_id} not resolvable")
+    guild = ch.get("guild_id")
+    if not guild and ch.get("parent_id"):
+        parent = get_channel(str(ch["parent_id"])) or {}
+        guild = parent.get("guild_id")
+    guild = str(guild) if guild else None
+    kind, want = ctx
+    if kind == "dm":
+        if guild or ch.get("type") not in DM_TYPES:
+            raise Refused(f"refused: channel {channel_id} is not a DM")
+        return "dm"
+    if not guild:
+        raise Refused(f"refused: channel {channel_id} has no guild (context {want})")
+    if guild != want:
+        raise Refused(f"refused: channel {channel_id} is in guild {guild}, context is {want}")
+    return guild
+
+
 def typing(channel_id):
     return api("POST", f"/channels/{channel_id}/typing", {})
 
@@ -232,11 +307,22 @@ def read_events(cursor=0, limit=20, wait_ms=0, bot=None):
                             batch = item.get("batch") or {}
                             if bot and batch.get("bot") != bot and batch.get("target") != bot:
                                 continue
+                            item["guild"] = event_guild(batch)
                             events.append(item)
                 return {"inbox": path, "events": events, "next_cursor": cursor}
         if time.time() >= deadline:
             return {"inbox": path, "events": [], "next_cursor": cursor}
         time.sleep(0.2)
+
+
+def event_guild(batch):
+    """Ready-to-copy context for writes: a guild id, "dm", or a list when one batch spans several."""
+    seen = []
+    for m in batch.get("messages") or []:
+        g = m.get("guild_id") or ("dm" if m.get("is_dm") else None)
+        if g and g not in seen:
+            seen.append(str(g))
+    return seen[0] if len(seen) == 1 else (seen or None)
 
 
 def same(a, b):
@@ -327,6 +413,11 @@ def call_tool(name, args):
         select_bot(args.get("bot") or "")
     except SystemExit as exc:
         return tool_result({"_error": 2, "_body": str(exc)}, True)
+    if name in WRITES:
+        try:
+            check_target(args.get("channel_id"), parse_ctx(args.get("guild_id"), bool(args.get("dm"))))
+        except Refused as exc:
+            return {"content": [{"type": "text", "text": str(exc)}], "isError": True}
     if name == "whoami":
         value = whoami()
     elif name == "channels":
@@ -341,10 +432,11 @@ def call_tool(name, args):
         value = send(str(args.get("channel_id", "")), str(args.get("text", "")), args.get("message_id"))
         if isinstance(value, dict) and "id" in value:
             value = {"id": value.get("id"), "channel_id": value.get("channel_id")}
-    elif name == "react":
-        value = react(str(args.get("channel_id", "")), str(args.get("message_id", "")), args.get("emoji", ""))
-    elif name == "unreact":
-        value = react(str(args.get("channel_id", "")), str(args.get("message_id", "")), args.get("emoji", ""), remove=True)
+    elif name in ("react", "unreact"):
+        value = react(str(args.get("channel_id", "")), str(args.get("message_id", "")), args.get("emoji", ""), remove=name == "unreact")
+        if value is None or value == {}:
+            return {"content": [{"type": "text", "text": "ok"}], "isError": False}
+        return {"content": [{"type": "text", "text": short_error(value) if failed(value) else json.dumps(value)}], "isError": failed(value)}
     elif name == "edit":
         value = edit(str(args.get("channel_id", "")), str(args.get("message_id", "")), str(args.get("text", "")))
         if isinstance(value, dict) and "id" in value:
@@ -359,6 +451,9 @@ def call_tool(name, args):
     return tool_result(value, failed)
 
 
+WRITES = {"typing", "send", "reply", "react", "unreact", "edit", "delete"}
+
+
 def schema(fields, required):
     props = {name: {"type": kind} for name, kind in fields}
     out = {"type": "object", "properties": props}
@@ -368,6 +463,8 @@ def schema(fields, required):
 
 
 def tool(name, description, fields, required):
+    if name in WRITES:
+        fields = fields + [("guild_id", S), ("dm", "boolean")]
     return {"name": name, "description": description, "inputSchema": schema(fields, required)}
 
 
@@ -411,7 +508,7 @@ def handle(msg):
             "protocolVersion": version,
             "capabilities": {"tools": {}},
             "serverInfo": {"name": "fluxer", "version": "1.0.0"},
-            "instructions": "Pass bot. Missing bot is an error. events returns raw batches.",
+            "instructions": "Pass bot. Writes need guild_id (copy the event's guild) or dm=true; other servers are refused. events returns raw batches.",
         })
     elif method == "ping":
         respond(msg_id, {})
@@ -453,6 +550,17 @@ def print_json(value, ok):
     return 0 if ok else 1
 
 
+def short_error(value):
+    """One line, e.g. `HTTP 404: Unknown Message`."""
+    body = str(value.get("_body", ""))
+    try:
+        body = json.loads(body).get("message") or body
+    except (ValueError, AttributeError):
+        pass
+    code = value.get("_error")
+    return (f"HTTP {code}: " if code else "error: ") + " ".join(str(body).split())[:120]
+
+
 def print_action(value):
     if isinstance(value, dict) and "id" in value:
         print(value["id"])
@@ -460,20 +568,34 @@ def print_action(value):
     if value is None or value == {}:
         print("ok")
         return 0
+    if failed(value):
+        print(short_error(value), file=sys.stderr)
+        return 1
     print(json.dumps(value))
-    return 1 if failed(value) else 0
+    return 0
 
 
 def cli(argv):
     if not argv or argv[0] in ("-h", "--help"):
         print(__doc__)
         return 2
-    bot = ""
-    if argv[0] == "--bot":
-        if len(argv) < 3:
-            print(BOT_REQUIRED, file=sys.stderr)
+    bot, guild, dm, dry = "", None, False, False
+    while argv and argv[0] in ("--bot", "--guild", "--dm", "--dry-run"):
+        flag = argv.pop(0)
+        if flag == "--dm":
+            dm = True
+        elif flag == "--dry-run":
+            dry = True
+        elif not argv:
+            print(f"{flag} needs a value", file=sys.stderr)
             return 2
-        bot, argv = argv[1], argv[2:]
+        elif flag == "--bot":
+            bot = argv.pop(0)
+        else:
+            guild = argv.pop(0)
+    if not argv:
+        print(BOT_REQUIRED, file=sys.stderr)
+        return 2
     cmd, rest = argv[0], argv[1:]
     if cmd == "bots":
         print("\n".join(list_bots()))
@@ -500,6 +622,18 @@ def cli(argv):
             return 0
     if cmd == "selftest":
         return selftest()
+    if cmd in WRITES:
+        if not rest:
+            print(__doc__)
+            return 2
+        try:
+            where = check_target(rest[0], parse_ctx(guild, dm))
+        except Refused as exc:
+            print(exc, file=sys.stderr)
+            return 3
+        if dry:
+            print(f"ok (dry run): {rest[0]} in {where}")
+            return 0
     if cmd == "whoami":
         value = whoami()
         return print_json(value, isinstance(value, dict) and "id" in value)
@@ -538,6 +672,95 @@ def cli(argv):
         return print_json(value, True)
     print(__doc__)
     return 2
+
+
+def guard_selftest():
+    """Guild pinning against a stub API: refusals never write, threads inherit their guild, DMs need dm."""
+    import subprocess, tempfile
+    G, H = "100000000000000010", "100000000000000099"
+    chans = {"2000000001": {"id": "2000000001", "type": 0, "guild_id": G}, "2000000002": {"id": "2000000002", "type": 0, "guild_id": H},
+             "2000000003": {"id": "2000000003", "type": 11, "parent_id": "2000000001"}, "2000000004": {"id": "2000000004", "type": 1}}
+    seen = []
+
+    class Stub(BaseHTTPRequestHandler):
+        def log_message(self, *_):
+            return
+
+        def _reply(self, code, obj):
+            raw = json.dumps(obj).encode()
+            self.send_response(code)
+            self.send_header("Content-Length", str(len(raw)))
+            self.end_headers()
+            self.wfile.write(raw)
+
+        def do_GET(self):
+            seen.append("GET " + self.path)
+            ch = chans.get(self.path.rsplit("/", 1)[-1])
+            self._reply(200 if ch else 404, ch or {"message": "Unknown Channel"})
+
+        def do_POST(self):
+            seen.append("POST " + self.path)
+            self._reply(200, {"id": "3000000001"})
+
+        def do_PUT(self):
+            seen.append("PUT " + self.path)
+            self.send_response(204)
+            self.end_headers()
+
+        do_PATCH = do_DELETE = do_POST
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Stub)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    saved = dict(ENV)
+    try:
+        ENV.update({"FLUXER_URL": f"http://127.0.0.1:{server.server_address[1]}", "FLUXER_BOT_TOKEN": "stub", "FLUXER_CONTEXT_GUILD": ""})
+        CHAN_CACHE.clear()
+        for ch, ctx, want in (("2000000002", ("guild", G), "is in guild"), ("2000000009", ("guild", G), "not resolvable"),
+                              ("2000000001", ("dm", None), "not a DM"), ("2000000004", ("guild", G), "has no guild")):
+            try:
+                check_target(ch, ctx)
+                raise SystemExit(f"guard let {ch} through")
+            except Refused as exc:
+                assert want in str(exc), exc
+        assert check_target("2000000003", ("guild", G)) == G
+        assert check_target("2000000004", ("dm", None)) == "dm"
+        for bad in ((None, False), (G, True)):
+            try:
+                parse_ctx(*bad)
+                raise SystemExit("bad context accepted")
+            except Refused:
+                pass
+        ENV["FLUXER_CONTEXT_GUILD"] = G
+        assert parse_ctx() == ("guild", G) and parse_ctx("dm") == ("dm", None)
+        assert not [x for x in seen if not x.startswith("GET ")], seen
+        bots = tempfile.mkdtemp(prefix="fluxer-guard-")
+        with open(os.path.join(bots, "g.env"), "w") as fh:
+            fh.write(f"FLUXER_URL={ENV['FLUXER_URL']}\nFLUXER_BOT_TOKEN=stub\n")
+        env = dict(os.environ, FLUXER_BOTS_DIR=bots, FLUXER_ENV=os.path.join(bots, "none.env"), FLUXER_CONTEXT_GUILD="")
+        run = lambda *a: subprocess.run([sys.executable, os.path.abspath(__file__), "--bot", "g", *a], env=env, capture_output=True, text=True)
+        r = run("send", "2000000002", "hi")
+        assert r.returncode == 3 and "no context guild" in r.stderr, r
+        r = run("--guild", G, "send", "2000000002", "hi")
+        assert r.returncode == 3 and "is in guild" in r.stderr, r
+        r = run("--guild", G, "--dry-run", "reply", "2000000001", "2000000099", "hi")
+        assert r.returncode == 0 and "dry run" in r.stdout, r
+        assert not [x for x in seen if not x.startswith("GET ")], seen
+        r = run("--guild", G, "send", "2000000001", "hi")
+        assert r.returncode == 0 and r.stdout.strip() == "3000000001", r
+        assert [x for x in seen if not x.startswith("GET ")] == ["POST /api/v1/channels/2000000001/typing", "POST /api/v1/channels/2000000001/messages"], seen
+        r = run("--guild", H, "react", "2000000001", "2000000099", "\U0001f44d")
+        assert r.returncode == 3 and "is in guild" in r.stderr and not seen[-1].startswith("PUT"), r
+        r = run("--guild", G, "react", "2000000001", "2000000099", "\U0001f44d")
+        assert r.returncode == 0 and r.stdout == "ok\n", r
+        assert seen[-1] == "PUT /api/v1/channels/2000000001/messages/2000000099/reactions/%F0%9F%91%8D/@me", seen
+        os.remove(os.path.join(bots, "g.env"))
+        os.rmdir(bots)
+        return 0
+    finally:
+        ENV.clear()
+        ENV.update(saved)
+        CHAN_CACHE.clear()
+        server.shutdown()
 
 
 def selftest():
@@ -623,6 +846,12 @@ def selftest():
             raise SystemExit("unauthenticated post was accepted")
         except urllib.error.HTTPError as exc:
             assert exc.code == 401
+        refused = rpc({"jsonrpc": "2.0", "id": 5, "method": "tools/call", "params": {"name": "send", "arguments": {"bot": "selftest", "channel_id": "100000000000000030", "text": "x"}}})
+        assert refused["result"]["isError"] is True and "no context guild" in refused["result"]["content"][0]["text"], refused
+        props = [t for t in listed["result"]["tools"] if t["name"] == "send"][0]["inputSchema"]["properties"]
+        assert "guild_id" in props and "dm" in props
+        if guard_selftest() != 0:
+            return 1
         print("selftest ok")
         return 0
     finally:

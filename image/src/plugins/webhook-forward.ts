@@ -2,6 +2,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { definePlugin } from '../plugin.js';
 import { JsonKV } from '../store.js';
+import { appliedTags } from './tags.js';
 import { BoundedMap, GATEWAY_EVENTS, MODES, THREAD_TYPES, decideDelete, decideEvent, decideMessage, nickOf, parseEvents, parseIgnore, toIdSet,
   type EventKind, type FilterOpts, type Mode, type Reason } from './forward-filter.js';
 
@@ -96,6 +97,13 @@ export default definePlugin({
       if (aid && aid === ctx.bot.userId()) ownIds.set(String(ref), true);
     }
 
+    /** Thread info. applied_tags ([{id, name}]) is added only when the thread has tags; everything else is unchanged. */
+    function threadObj(ch: any, parent: any) {
+      const tags = appliedTags(ch, parent);
+      return { id: ch.id, name: ch.name, parent_id: ch.parent_id ?? null, parent_name: parent?.name ?? null, parent_is_forum: parent?.type === 15,
+        ...(tags.length ? { applied_tags: tags } : {}) };
+    }
+
     async function shape(m: any, event: 'create' | 'edit' | 'delete', reason: Reason, ch: any, backfill: boolean): Promise<Item> {
       const parent = ch?.parent_id ? await channel(String(ch.parent_id)) : null;
       const isThread = ch && [10, 11, 12].includes(ch.type);
@@ -110,7 +118,7 @@ export default definePlugin({
         attachments: (m.attachments || []).map((a: any) => ({ url: a.url, filename: a.filename, content_type: a.content_type, size: a.size })),
         reply_to: m.referenced_message ? { id: m.referenced_message.id, author_id: m.referenced_message.author?.id, content: String(m.referenced_message.content ?? '').slice(0, 500) } : null,
         reference: m.message_reference ?? null,
-        thread: isThread ? { id: ch.id, name: ch.name, parent_id: ch.parent_id ?? null, parent_name: parent?.name ?? null, parent_is_forum: parent?.type === 15 } : null,
+        thread: isThread ? threadObj(ch, parent) : null,
         parent_channel_id: ch?.parent_id ?? null,
         reason, legacy_reason: LEGACY_REASON[reason],
         ...(backfill ? { backfill: true } : {}),
@@ -219,7 +227,7 @@ export default definePlugin({
         guild_id: d.guild_id ?? ch?.guild_id ?? null, guild_name: await gname(d.guild_id ?? ch?.guild_id), is_dm: false,
         author: userObj(actor, d.member), user: subject ? userObj(subject, d) : null,
         timestamp: new Date().toISOString(), edited_timestamp: null, content: null, attachments: [], reply_to: null, reference: null,
-        thread: isThread ? { id: ch.id, name: ch.name, parent_id: ch.parent_id ?? null, parent_name: parent?.name ?? null, parent_is_forum: parent?.type === 15 } : null,
+        thread: isThread ? threadObj(ch, parent) : null,
         parent_channel_id: parentId, reason: dec.reason, legacy_reason: LEGACY_REASON[dec.reason] ?? dec.reason, ...extra,
       };
       queue(item, ch, !!actor?.bot);

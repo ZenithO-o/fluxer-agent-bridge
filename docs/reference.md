@@ -32,6 +32,7 @@ Run these with sudo on the bridge host. Settings come from `bridge.env`.
 | `reload.sh <owner>` | SIGHUP to PID 1 through `docker exec`. Restarts a bot only when its config hash changed |
 | `status.sh <owner> <bot> …` | Drive activity status. See below |
 | `test-webhook.sh <owner> <bot>` | One synthetic POST from `cli.js`. Not a live batch, and nothing is posted in Fluxer |
+| `post.sh <owner> <bot> (--guild ID \| --dm) [--reply-to ID] [--dry-run] <channel> <text…\|->` | Guild-pinned post with the token inside the container. Types first, prints the new id. Exit 3 = refused, nothing written. See [Guild pinning](#guild-pinning) |
 | `drill-reconnect.sh <owner>` | Drop the gateway socket with no close frame. Expect `RESUMED` |
 | `remove-bot.sh <owner> <bot>` | Move that bot's directory to `backup/` and send SIGHUP. The `owners.conf` row and the container stay |
 | `render-compose.sh` | Rewrite `compose.yml` from `owners.conf` |
@@ -235,22 +236,46 @@ A 4xx other than 408 or 429 pauses delivery until that bot process is created ag
 
 `event` is `create`, `edit`, `delete`, or an extra-event name. Non-message events use a synthetic `id` of the form `kind:timestamp:seq` and set `content` to null. `backfill: true` marks a message recovered by REST after a gap. `test: true` on the batch marks a test post. `target` repeats `bot`.
 
+A thread in a forum with tags also gets `thread.applied_tags: [{"id": "…", "name": "Bug"}]`, The key is absent when the thread has no tags. Otherwise the payload is byte-identical to before.
+
 `test-webhook.sh` does not use this plugin path. Its body also sets top-level `synthetic: true`, uses message reason `test`, and sends no `Idempotency-Key`.
 
 Up to 50 items and 512 KiB per POST, about every 3 seconds while the outbox has traffic. The oldest outbox items are dropped past `outbox_max`. `dropped_due_to_backlog` is sent on a later POST and cleared after a 2xx.
 
 ## How an agent replies
 
-Do not build the REST body. `bin/fluxer --bot <name>` types, then posts, and it URL-encodes reactions. A missing bot name is an error. The token is in `~/.config/fluxer-agent-bridge/bots/<name>.env`. That URL name is not `FLUXER_INSTANCE`. `FLUXER_INSTANCE` is only the bridge host file.
+Do not build the REST body. `bin/fluxer --bot <name>` types, then posts, and it URL-encodes reactions. A missing bot name is an error. The token is in `~/.config/fluxer-agent-bridge/bots/<name>.env`. That URL name is not `FLUXER_INSTANCE`. `FLUXER_INSTANCE` is only the bridge host file. Every write takes the guild of the message it answers (`--guild "$GUILD"` from the payload's `guild_id`, or `--dm`).
 
 ```sh
-bin/fluxer --bot alice_bot send "$CHANNEL" "On it!"
-bin/fluxer --bot bob_bot reply "$CHANNEL" "$MSG" "On it!"
-bin/fluxer react "$CHANNEL" "$MSG" "👍"
-bin/fluxer edit "$CHANNEL" "$MSG" "Updated."
-bin/fluxer delete "$CHANNEL" "$MSG"
+bin/fluxer --bot alice_bot --guild "$GUILD" send "$CHANNEL" "On it!"
+bin/fluxer --bot bob_bot --guild "$GUILD" reply "$CHANNEL" "$MSG" "On it!"
+bin/fluxer --bot alice_bot --dm reply "$DM_CHANNEL" "$MSG" "Sure."
+bin/fluxer --bot alice_bot --guild "$GUILD" react "$CHANNEL" "$MSG" "👍"
+bin/fluxer --bot alice_bot --guild "$GUILD" edit "$CHANNEL" "$MSG" "Updated."
+bin/fluxer --bot alice_bot --guild "$GUILD" delete "$CHANNEL" "$MSG"
 ```
 
-`send` and `reply` call typing first. That is what the bridge treats as Responding, unless you use `status.sh`. The bridge then sees the bot's own `MESSAGE_CREATE` and can show Responded.
+### Guild pinning
+
+A bot may only write into the server (or DM) of the message it is answering. Every posting path in this repo enforces it, fail closed:
+
+| Path | Context | Refusal |
+|---|---|---|
+| `bin/fluxer` / `mcp/fluxer.py` CLI | `--guild <id>` or `--dm` before the command, else `FLUXER_CONTEXT_GUILD=<id>\|dm` | stderr `refused: …`, exit 3 |
+| `mcp/fluxer.py` MCP tools `typing send reply react unreact edit delete` | `guild_id` (string) or `dm` (boolean), else `FLUXER_CONTEXT_GUILD` | `isError: true`, text `refused: …` |
+| `examples/agent_post.py` | `api(..., guild=…)`, `reply(..., guild=…)` or `dm=True`, CLI `--guild` / `--dm` | raises `GuildRefused`; CLI exit 3 |
+| `cli.js post` / `bin/post.sh` (inside the container, bot's own token) | `--guild <id>` or `--dm` | stderr, exit 3 |
+
+The target channel is resolved first with a read (`GET /channels/{id}`, cached for 60 s; a thread uses its `guild_id`, or its parent's). The write is refused, without being sent, when the channel is in another guild, when `--dm` is given and it is not a DM, when it cannot be resolved, when both or neither of guild and DM are given, or when the guild id is malformed. `--guild dm` is the same as `--dm`. `--dry-run` runs the check and stops. `events` adds a ready-to-copy `guild` (an id, `"dm"`, or a list when one batch spans several) to each inbox event.
+
+`bin/post.sh` is for posters that reach the bridge host over SSH and should not hold a token. `-` reads the text from stdin, which avoids quoting through ssh:
+
+```sh
+printf '%s' "$TEXT" | ssh bridge-host sudo /opt/fluxer-agent-bridge/bin/post.sh alice alice_bot --guild "$GUILD" --reply-to "$MSG" "$CHANNEL" -
+```
+
+**Caveat.** This guards the tools, not the token. Anyone holding a raw bot token can call the REST API directly and post anywhere that bot can see. The full fix is on the roadmap: post only through the bridge (`post.sh`, or a future control endpoint), and remove bot tokens from agent machines.
+
+`react` and `unreact` print `ok`, or one line such as `HTTP 404: Unknown Message`. In MCP they return the text `ok`. `send` and `reply` call typing first. That is what the bridge treats as Responding, unless you use `status.sh`. The bridge then sees the bot's own `MESSAGE_CREATE` and can show Responded.
 
 The underlying call is `Authorization: Bot <app_id>.<secret>` against `https://<instance>/api/v1`. `examples/agent_post.py` is the same two calls, if a program needs the library instead of the command.
