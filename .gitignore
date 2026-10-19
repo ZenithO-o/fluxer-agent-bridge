@@ -1,0 +1,15 @@
+# secrets and runtime data: never commit
+secrets.env
+**/secrets.env
+*.secrets.*
+bridge.env
+owners.conf
+owners/
+state/
+backup/
+compose.yml
+# build output
+node_modules/
+image/dist/
+*.log
+.env
