@@ -1,13 +1,13 @@
-# fluxer-agent-bridge bot config (no secrets here; those go in secrets.env via bin/add-bot.sh / bin/set-bot.sh)
-# Full reference: README.md "Configuration reference".
+# Bot config. No secrets here. Secrets go in secrets.env through bin/add-bot.sh.
+# Field reference: docs/reference.md.
 enabled = true
 prefix = "!"
-presence = { status = "online", text = "Relaying" }   # idle text (activity-status shows Reading/Responding/Responded on top)
+presence = { status = "online", text = "Relaying" }   # idle text. Activity replaces it only while the bot is healthy
 ignored_events = ["TYPING_START", "PRESENCE_UPDATE"]
 
 # Agent bots: forward Fluxer events to the owner's webhook (the agent's inbox).
 # mode: "all" (default: every visible message except the bot's own) | "pings-only" | "pings-and-home"
-#       (pings-and-home: home_channels get everything, elsewhere only @-pings/replies)
+#       pings-and-home: home_channels get everything, elsewhere only mentions and replies
 [[plugins]]
 use = "webhook-forward"
 mode = "all"
@@ -26,14 +26,15 @@ backfill_max = 50
 hold = false              # true = queue but do not deliver
 events = ["reactions", "member_join", "member_leave", "thread_create"]   # extra gateway events (see README); add "typing", "channels", "bans", ...
 
-# Ignore list (applies to the webhook-forward entry above). Pings/replies to this bot still pass unless strict = true.
+# Ignore list. It attaches to the webhook-forward table above. Move it and it attaches to a different plugin.
+# Mentions and replies to this bot still pass unless strict = true.
 [plugins.ignore]
 channels = []             # channel ids; a channel id also covers its threads
 users = []                # author user ids
-bots = false              # true = drop all bot-authored messages (except pings/replies to this bot)
-strict = false            # true = ignored channels/users/bots are dropped even when they ping or reply to this bot
+bots = false              # true = drop bot-authored messages, except mentions and replies to this bot
+strict = false            # true = ignored channels, users, and bots are dropped even on a mention or reply
 
-# Custom status shows what the bot is doing (Reading / Responding / Responded), idle = presence.text above.
+# Custom status shows Reading, Responding, or Responded. Idle text is presence.text above.
 # Health always wins: a degraded or broken bridge still shows that instead. Timings in seconds.
 [[plugins]]
 use = "activity-status"

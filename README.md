@@ -1,328 +1,130 @@
 # fluxer-agent-bridge
 
-A persistent, multi-bot host for [Fluxer](https://github.com/fluxerapp/fluxer) that connects bot accounts to **AI agents**.
-Each bot is an ordinary Fluxer bot client: it logs in over the gateway, forwards the events it can see to its
-owner's **webhook** (batched, retried, persisted), and the agent answers through the normal Fluxer REST API as that bot.
-The bot's online status **is** the bridge's health, and its custom status shows what the agent is doing
-("Reading Alice's message" → "Responding to Alice's message" → "Responded to Alice's message").
+Fluxer bot accounts run in Docker. Each bot forwards the events it can see to an HTTPS webhook. Your agent replies with the Fluxer REST API as that bot. The bot's Fluxer presence is the bridge's health.
 
-* One container per **owner**, any number of bots per owner, all from one image (Node 22 + [Fluxer.js](https://www.npmjs.com/package/@fluxerjs/core), patched for correct resumes).
-* Nothing connects *into* the bridge host: outbound WSS to your Fluxer instance plus outbound HTTPS to webhooks.
-* Plugins per bot: `webhook-forward` (events → webhook), `activity-status` (status shows agent activity), `ping` (`!ping`). Moderation-style plugins are a natural next step (see the plugin API in `image/src/plugin.ts`).
-* Works with any agent that can receive an HTTP POST: a hosted agent's webhook routine, a small receiver feeding a CLI agent, a queue, and so on (see [Recipes](#wiring-agents-to-the-webhook-recipes)).
+One image. One container per owner. Any number of bots in that container. The host publishes no ports. Each container dials your Fluxer gateway and the owner's webhook.
 
-Status: in production on one small private instance (two agent bots) since Oct 2026. Treat it as early software.
+This page gets one bot online. The wire contract, agent recipes, and Fluxer limits are linked at the end.
 
-## Architecture
+One private instance has run two agent bots since October 2026. Treat the project as early software.
 
-```mermaid
-flowchart LR
-  subgraph FX["Your Fluxer instance (stock, untouched)"]
-    GW["wss://…/gateway?v=1"]
-    API["https://…/api/v1"]
-  end
-  subgraph HOST["Bridge host (Docker)"]
-    subgraph CA["container fab-alice"]
-      SA["supervisor + loopback health/control :8080"]
-      B1["alice_bot\nwebhook-forward + activity-status"]
-      B2["modbot (no webhook)\nping, future mod plugins"]
-      QA[("state/alice: outbox, cursors")]
-    end
-    subgraph CB["container fab-bob"]
-      B3["bob_bot\nwebhook-forward + activity-status"]
-    end
-  end
-  AG1["Alice's agent\n(webhook receiver)"]
-  AG2["Bob's agent"]
-  B1 & B2 & B3 -- "IDENTIFY/RESUME, heartbeats" --> GW
-  GW -- "MESSAGE_CREATE, reactions, …" --> B1 & B2 & B3
-  B1 -- "batched POST (HTTPS)" --> AG1
-  B3 -- "batched POST" --> AG2
-  AG1 -. "REST: typing, then POST message as alice_bot" .-> API
-  AG2 -. "REST as bob_bot" .-> API
-```
+## What you need
 
-Flow for an agent bot: gateway event → filter (mode, ignore list) → outbox (persistent, bounded) → batched POST to the
-webhook → agent decides → agent replies via REST as the bot → the bridge sees its own message → status "Responded".
+- A Linux host with Docker, the Compose plugin, and `curl`.
+- Root on that host. The scripts exit if you are not root.
+- A Fluxer instance URL, and a bot application on it.
 
-| Bridge state | Fluxer shows |
-|---|---|
-| connected, webhook delivering | **online** + idle text (or the current activity) |
-| webhook failing ≥3 rounds / outbox > 80 % | **idle** + "webhook down, N queued" / "webhook backlog N" |
-| webhook rejects with 4xx (bad key) / plugin crash loop | **dnd** + reason, delivery paused until config reload |
-| process, container, host or network down | **offline** (Fluxer marks a dropped session offline after ~5 s) |
+Node on the host is not required. The image carries Node 22.
 
-## Quick start (docker compose)
+## Bring one bot online
 
-Requirements: Linux host with Docker + compose plugin, `curl`, a Fluxer instance, and a bot application on it.
+The commands use `/opt/fluxer-agent-bridge`. Any checkout works. The scripts locate that checkout from their own path.
+
+1. Clone the repo and set the instance URL.
 
 ```sh
-git clone https://github.com/ZenithO-o/fluxer-agent-bridge /opt/fluxer-agent-bridge && cd /opt/fluxer-agent-bridge
-cp bridge.env.example bridge.env && $EDITOR bridge.env        # FLUXER_INSTANCE=https://chat.example.org
-sudo docker build -t fluxer-agent-bridge:local image/
+git clone https://github.com/ZenithO-o/fluxer-agent-bridge /opt/fluxer-agent-bridge
+cd /opt/fluxer-agent-bridge
+cp bridge.env.example bridge.env
+```
 
-# 1. In Fluxer: User settings → Applications → new application → Bot → copy the token (shown once).
-# 2. Install the bot into your community: https://<instance>/oauth2/authorize?client_id=<APP_ID>&scope=bot&permissions=0
-#    (needs Manage Community there). Channel permissions decide what the bot can see.
-# 3. Add it to the bridge. Secrets go on stdin only, never as arguments:
-read -rs TOK; read -rs KEY
-printf 'FLUXER_BOT_TOKEN=%s\nWEBHOOK_URL=%s\nWEBHOOK_AUTH=%s\n' "$TOK" "https://agent.example/hooks/fluxer" "Bearer $KEY" \
+Edit `bridge.env`. Set `FLUXER_INSTANCE` to your instance, including `https://`. The scripts exit if the value is missing, is not `https://`, or is still `https://your-fluxer.example`.
+
+2. Build the image. The tag must match `BB_IMAGE` in `bridge.env`. The default tag is `fluxer-agent-bridge:local`.
+
+```sh
+sudo docker build -t fluxer-agent-bridge:local image/
+```
+
+3. In Fluxer, open User settings, then Applications, and create an application. Open Bot and copy the token. It is shown once. The shape is `<app_id>.<secret>`. The bot user id is the application id.
+
+Install the bot into a community. You need Manage Community there.
+
+```text
+https://<instance>/oauth2/authorize?client_id=<APP_ID>&scope=bot&permissions=0
+```
+
+Channel permissions decide what the bot can see. No script checks the install. A connected bot that was never added to a community forwards nothing.
+
+4. Add the bot. Put secrets on stdin. They are not arguments, and the script does not prompt. If you run `sudo bin/add-bot.sh alice alice_bot` with no pipe, it creates files and leaves the token unset.
+
+`alice` and `alice_bot` must match `[a-z0-9_]{1,32}`.
+
+The webhook URL must be reachable from the container. `127.0.0.1` inside the container is not your host.
+
+```sh
+read -rs TOK
+read -rs KEY
+printf 'FLUXER_BOT_TOKEN=%s\nWEBHOOK_URL=%s\nWEBHOOK_AUTH=%s\n' \
+  "$TOK" "https://agent.example/hooks/fluxer" "Bearer $KEY" \
   | sudo bin/add-bot.sh alice alice_bot
 unset TOK KEY
+```
+
+On the first owner you should see `new owner alice (uid 10001)`, then `token OK:` followed by the bot username and id. A failed token check prints a warning and the script still starts the container. That bot stays failed until `secrets.env` changes and the process reloads.
+
+5. Confirm the process, then send one synthetic webhook batch. The test batch is not posted in Fluxer.
+
+```sh
 sudo bin/list-bots.sh
+sudo bin/test-webhook.sh alice alice_bot
 ```
 
-`add-bot.sh` creates `owners.conf` and the owner's uid (10001+), writes `owners/alice/alice_bot/bot.toml` (from
-`templates/bot.toml`) and `secrets.env` (mode 600), checks the token against `/api/v1/users/@me` without printing it,
-regenerates `compose.yml` and starts container `fab-alice`. Edit `bot.toml`, then `sudo bin/reload.sh alice`
-(only bots whose files changed reconnect, ~3 s).
+`list-bots.sh` prints Docker health and one line per bot. It prints no secrets. A live batch and the test batch are not the same body. The difference is in [the reference](docs/reference.md#webhook-payload).
 
-`sudo bin/test-webhook.sh alice alice_bot` sends one synthetic `test:true` batch to the webhook (nothing is posted in Fluxer).
-
-### Scripts (`bin/`, run with sudo on the bridge host)
-
-| script | does |
-|---|---|
-| `add-bot.sh <owner> <bot>` / `set-bot.sh` | create/update a bot. `KEY=VALUE` lines on stdin: `FLUXER_BOT_TOKEN`, `WEBHOOK_URL`, `WEBHOOK_AUTH`, `WEBHOOK_KEY` (legacy). Keys you don't send are kept |
-| `list-bots.sh [owner]` | state, presence, webhook status per bot (no secrets) |
-| `reload.sh <owner>` | re-read configs (SIGHUP to PID 1 via `docker exec`) |
-| `status.sh <owner> <bot> responding\|idle\|show …` | drive the activity status (see below) |
-| `test-webhook.sh <owner> <bot>` | synthetic test batch to the webhook |
-| `drill-reconnect.sh <owner>` | drop the gateway socket without a close frame; expect RESUMED and no lost events |
-| `remove-bot.sh <owner> <bot>` | move the bot's files to `backup/` and reload |
-| `render-compose.sh` | regenerate `compose.yml` from `owners.conf` |
-
-Settings for the scripts live in `bridge.env` (`FLUXER_INSTANCE`, optional `BB_PREFIX` = container prefix, default `fab`,
-and `BB_IMAGE`, default `fluxer-agent-bridge:local`). Rebuild after code changes:
-`sudo docker build -t fluxer-agent-bridge:local image/ && sudo docker compose up -d`.
-
-### Layout on the host
-```
-fluxer-agent-bridge/
-  bridge.env                 instance URL etc. (yours, git-ignored)
-  owners.conf                owner -> container uid (generated, git-ignored)
-  compose.yml                GENERATED by bin/render-compose.sh (git-ignored)
-  owners/<owner>/<bot>/      bot.toml (no secrets) + secrets.env (0600)      mounted read-only at /cfg
-  state/<owner>/<bot>/       outbox, cursors, own-message ids               mounted at /state
-  backup/                    removed bots / previous secrets (root only)
-  image/  bin/  templates/  examples/  tools/
-```
-Containers run as the owner's uid with a read-only root fs, `cap_drop: ALL`, `no-new-privileges`, memory/pid limits and log rotation.
-
-## Configuration reference (`bot.toml`)
-
-```toml
-enabled = true
-prefix = "!"                                   # prefix for plugin commands (Fluxer has no slash commands)
-presence = { status = "online", text = "Relaying" }   # online|idle|dnd; text = idle custom status
-ignored_events = ["TYPING_START", "PRESENCE_UPDATE"]  # sent in IDENTIFY; Fluxer's replacement for intents
-```
-
-### `webhook-forward`
-```toml
-[[plugins]]
-use = "webhook-forward"
-mode = "all"              # "all" (default) | "pings-and-home" | "pings-only"
-home_channels = []        # tagged reason "home"; in pings-and-home mode these get everything
-include_dms = true
-include_edits = true      # MESSAGE_UPDATE  -> event "edit"
-include_deletes = true    # MESSAGE_DELETE(_BULK) -> event "delete" (content null)
-include_bots = true       # forward other bots (your own bot's messages are never forwarded)
-skip_authors = ["self"]   # hard drop, even pings
-channels = []             # allow-list; empty = every channel the bot can view (a thread matches its parent)
-skip_channels = []        # hard drop, even pings
-batch_seconds = 3
-max_per_post = 50
-max_post_bytes = 524288
-outbox_max = 500          # persistent; oldest dropped and counted as dropped_due_to_backlog
-backfill_max = 50         # after a fresh IDENTIFY, recover up to this many missed messages via REST (backfill: true)
-everyone_is_ping = false  # treat @everyone/@here as a ping
-hold = false              # queue but don't deliver
-events = ["reactions", "member_join", "member_leave", "thread_create"]   # opt-in extra events (below)
-
-[plugins.ignore]          # must follow the webhook-forward [[plugins]] block (TOML attaches it to the last entry)
-channels = []             # channel ids; a channel id also covers its threads
-users = []                # author/actor user ids
-bots = false              # drop all bot-authored events
-strict = false            # if false, pings / replies / reactions to this bot still pass an ignore
-```
-
-**Modes.** `all`: every event the bot can see except its own. `pings-and-home`: everything in `home_channels` (+ DMs),
-elsewhere only pings and replies to the bot. `pings-only`: only pings and replies.
-
-**Reasons** (each item's `reason`, highest priority first): `ping` (bot @-mentioned, or one of its roles) ·
-`reply-to-bot` (message_reference points at one of the bot's messages) · `reaction-to-bot` (reaction on the bot's
-message) · `dm` · `home` · `all`. `legacy_reason` carries older names (`mention`, `reply`, `reaction`, …).
-
-**Extra events** (`events`, opt-in, forwarded in every mode, self skipped, ignore list applied):
-
-| name (alias) | gateway event(s) | extra fields |
-|---|---|---|
-| `reaction_add`, `reaction_remove` (`reactions`) | MESSAGE_REACTION_ADD / _REMOVE / _REMOVE_ALL / _REMOVE_EMOJI | `message_id`, `emoji{id,name,animated}`, `message_author_id`, `remove_all` |
-| `member_join`, `member_leave`, `member_update` (`members`) | GUILD_MEMBER_ADD / _REMOVE / _UPDATE | `user{…}`, `member{nick,roles,joined_at}` |
-| `thread_create`, `thread_update`, `thread_delete` (`threads`) | THREAD_*, or CHANNEL_* with a thread type | `channel{id,name,type,parent_id,owner_id}`, `thread{…}` |
-| `channel_create`, `channel_update`, `channel_delete` (`channels`) | CHANNEL_* | `channel{…}` |
-| `ban_add`, `ban_remove` (`bans`) | GUILD_BAN_ADD / _REMOVE | `user{…}` |
-| `typing` | TYPING_START (also remove it from `ignored_events`) | `author` = who is typing; noisy, off by default |
-
-### `activity-status`
-```toml
-[[plugins]]
-use = "activity-status"
-reading_seconds = 120          # "Reading NICK's message(s)" after a webhook 2xx; ends on Responding or after this
-responding_seconds = 120       # "Responding to NICK's message"; ends when the reply lands or after this
-responded_seconds = 20         # "Responded to NICK's message", then idle
-min_update_seconds = 2         # coalesce presence updates (latest state wins)
-max_updates_per_minute = 12    # plus a hard cap of 4 per 20 s (Fluxer allows 5 per 20 s)
-typing_means_responding = true # the bot's own typing counts as Responding (TYPING_START is then not ignored)
-# idle_text = "…"              # default: presence.text
-```
-
-| state | text | entered | left |
-|---|---|---|---|
-| idle | `presence.text` | start, timeouts | |
-| reading | "Reading NICK's message" · "Reading NICK's messages" (one author) · "Reading multiple messages" | webhook accepted a batch with message creates/edits | Responding, or `reading_seconds` after the last batch |
-| responding | "Responding to NICK's message" | the agent signals Responding | Responded, or `responding_seconds` |
-| responded | "Responded to NICK's message" | the bot's own new message appears on the gateway (NICK from its message_reference, else the last Responding) | `responded_seconds` |
-
-NICK = guild nickname, else global display name, else username. **Health always wins:** a degraded or broken bridge
-shows that instead of the activity.
-
-## Webhook payload
-
-`POST WEBHOOK_URL`, `Content-Type: application/json`, `Authorization: <WEBHOOK_AUTH>`, `Idempotency-Key: <hash of the
-batch>`, `User-Agent: fluxer-agent-bridge/1.0`. Any 2xx = delivered. Failures: 5 quick retries, then a round every 1–10 min.
-A 4xx other than 408/429 pauses delivery (presence dnd) until you fix the config and reload.
-
-```json
-{
-  "source": "fluxer-agent-bridge", "schema": 2, "owner": "alice", "bot": "alice_bot", "target": "alice_bot", "test": false,
-  "messages": [
-    { "event": "create", "id": "100000000000000105", "reason": "reply-to-bot", "legacy_reason": "reply",
-      "channel_id": "100000000000000030", "channel_name": "general", "parent_channel_id": null,
-      "guild_id": "100000000000000010", "guild_name": "Example Guild", "is_dm": false,
-      "author": { "id": "100000000000000900", "username": "alice", "global_name": "Alice", "nick": null, "display_name": "Alice", "bot": false },
-      "timestamp": "2026-10-19T04:32:00.000Z", "edited_timestamp": null,
-      "content": "thanks!", "attachments": [{ "url": "…", "filename": "a.png", "content_type": "image/png", "size": 1234 }],
-      "reply_to": { "id": "100000000000000100", "author_id": "100000000000000001", "content": "first 500 chars…" },
-      "reference": { "message_id": "100000000000000100", "channel_id": "100000000000000030" },
-      "thread": null },
-    { "event": "create", "id": "100000000000000106", "reason": "all", "legacy_reason": "all",
-      "channel_id": "100000000000000041", "channel_name": "trips > packing list", "parent_channel_id": "100000000000000040",
-      "thread": { "id": "100000000000000041", "name": "packing list", "parent_id": "100000000000000040", "parent_name": "trips", "parent_is_forum": true },
-      "author": { "id": "100000000000000002", "username": "bob_bot", "display_name": "bob_bot", "bot": true, "global_name": null, "nick": null },
-      "content": "…", "...": "same fields as above" },
-    { "event": "delete", "id": "100000000000000099", "reason": "all", "content": null, "author": null, "...": "…" },
-    { "event": "reaction_add", "id": "reaction_add:1792390000000:7", "reason": "reaction-to-bot",
-      "channel_id": "100000000000000030", "message_id": "100000000000000100", "emoji": { "id": null, "name": "👍", "animated": false },
-      "message_author_id": "100000000000000001", "author": { "id": "100000000000000900", "username": "alice", "display_name": "Alice", "bot": false },
-      "content": null, "...": "…" },
-    { "event": "member_join", "id": "member_join:1792390000001:8", "reason": "all", "channel_id": null,
-      "user": { "id": "100000000000000901", "username": "newbie", "bot": false }, "member": { "nick": null, "roles": [], "joined_at": "…" } }
-  ],
-  "dropped_due_to_backlog": 0
-}
-```
-* `event`: `create`, `edit`, `delete`, or an extra-event name. Non-message events have a synthetic `id` and `content: null`.
-* `backfill: true` marks messages recovered by REST after a gap. `test: true` (top level) marks `test-webhook.sh` batches.
-* Up to 50 items / 512 KiB per POST, about every 3 s while there is traffic.
-* Logs never contain tokens, webhook URLs/keys or message bodies (ids, channel names and counts only).
-
-## How an agent replies
-
-Use the Fluxer REST API with the bot's token (`Authorization: Bot <app_id>.<secret>`, base `https://<instance>/api/v1`):
+6. Edit `owners/alice/alice_bot/bot.toml` when you want a narrower filter than the template. Then reload.
 
 ```sh
-# 1) Signal "Responding" (and show a normal typing indicator): any bot, no extra credentials
-curl -sS -X POST -H "Authorization: Bot $TOKEN" -H 'Content-Length: 0' "$FLUXER/api/v1/channels/$CHANNEL/typing"   # 204
-# 2) Reply to the message you got in the webhook
-curl -sS -X POST -H "Authorization: Bot $TOKEN" -H 'Content-Type: application/json' \
-  -d "{\"content\":\"On it!\",\"message_reference\":{\"message_id\":\"$MSG\",\"channel_id\":\"$CHANNEL\"}}" \
-  "$FLUXER/api/v1/channels/$CHANNEL/messages"
+sudo bin/reload.sh alice
 ```
-The bridge then sees the bot's own MESSAGE_CREATE and shows "Responded to NICK's message". `examples/agent_post.py`
-wraps this (`reply(channel, text, reply_to=msg)`), doing the typing signal automatically and best-effort.
 
-**Precise Responding (optional, for agents with shell access to the bridge host):**
-`sudo bin/status.sh <owner> <bot> responding <user_id|nick|-> [channel_id|-] [message_id|-] [issued_at_ms]` names the exact
-message or person. It talks to the container's loopback-only control endpoint via `docker exec`: no network listener,
-no token. A command for a message that was already answered, or issued before the latest Responded, is ignored.
-`examples/fab-status.py` runs it over ssh, and `agent_post.py` fires it in the background when `BB_SSH` etc. are set.
+Reload restarts a bot only when the bytes of `bot.toml` or `secrets.env` changed. An unchanged reload does not clear a paused webhook. The rule is in [What Fluxer shows](docs/reference.md#what-fluxer-shows).
 
-The typing approach names the last author in the channel, which is usually right. Use `status.sh` when it matters.
+A healthy bot shows online in Fluxer, with the idle text from `bot.toml` or a short activity line. A failing webhook replaces that line. The full table is in [the reference](docs/reference.md#what-fluxer-shows).
 
-## Wiring agents to the webhook (recipes)
+## Names on the host
 
-| recipe | status |
-|---|---|
-| Hosted-agent webhook routine | **tested** (two bots in production) |
-| Generic HTTP receiver → inbox file | **tested** locally (`examples/receivers/http_receiver.py`) |
-| CLI agent (Claude Code etc.) via receiver `--exec` / inbox | **untested** sketch |
-| OpenClaw-style agents | **untested** sketch |
+Containers are named `fab-<owner>` unless you set `BB_PREFIX` in `bridge.env`. `BB_` is the env prefix inside the image, for example `BB_OWNER`. It is not a second product. `bin/set-bot.sh` runs `bin/add-bot.sh`. Use either name.
 
-**Hosted-agent webhook routine (tested).** Many agent platforms let you create a routine/automation with an HTTPS
-webhook trigger and a bearer key. Put its URL in `WEBHOOK_URL` and `Bearer <key>` in `WEBHOOK_AUTH`. Tell the routine:
-the body is the payload above, act on `reason` (e.g. always answer `ping`/`reply-to-bot`, read `all` for context),
-reply with the REST calls from [How an agent replies](#how-an-agent-replies) (typing first), and skip `test: true` batches.
+## Layout
 
-**Generic HTTP receiver (tested locally).** `examples/receivers/http_receiver.py` (stdlib Python) checks the bearer
-token, de-duplicates by `Idempotency-Key`, appends each event to a JSONL inbox and answers 200:
-```sh
-WEBHOOK_TOKEN="$KEY" ./examples/receivers/http_receiver.py --host 0.0.0.0 --port 8787 --inbox ~/fluxer-inbox.jsonl
-# bridge: WEBHOOK_URL=http://<receiver-host>:8787/fluxer  WEBHOOK_AUTH=Bearer <KEY>
-./examples/receivers/inbox_tail.sh ~/fluxer-inbox.jsonl     # human-readable stream
+```text
+bridge.env                 instance URL. Git-ignored.
+owners.conf                owner and container uid. Generated. Git-ignored.
+compose.yml                generated by bin/render-compose.sh. Git-ignored.
+owners/<owner>/<bot>/      bot.toml and secrets.env. Mounted read-only at /cfg.
+state/<owner>/<bot>/       outbox and cursors. Mounted at /state.
+backup/                    removed bots and previous secrets. Root only.
+image/  bin/  templates/  examples/  tools/  docs/
 ```
-Use TLS (reverse proxy, tailnet) unless the receiver and the bridge share a private network.
 
-**CLI agent, e.g. Claude Code (untested).** Run the receiver with `--exec` so each batch starts a non-interactive
-agent turn, with the batch JSON on stdin:
-```sh
-WEBHOOK_TOKEN="$KEY" ./examples/receivers/http_receiver.py --exec \
-  'claude -p "You are alice_bot on Fluxer. Read the JSON batch on stdin. If anything needs an answer, reply with examples/agent_post.py (send <channel> <text> --reply-to <id>). Otherwise do nothing."'
-```
-Or keep a long-running agent session and have it poll `~/fluxer-inbox.jsonl` (for example `inbox_tail.sh` in a loop).
-Rate-limit `--exec` yourself if the channel is busy (e.g. `mode = "pings-only"` or an ignore list).
+Containers run as the owner's uid. The root filesystem is read-only. All capabilities are dropped. Memory and pid limits apply. Root on the host can read every secret. The model is in [SECURITY.md](SECURITY.md).
 
-**OpenClaw-style agents (untested).** Agents that expose an HTTP "hook" or inbox endpoint can take the payload directly:
-point `WEBHOOK_URL` at that endpoint and give the agent `agent_post.py` (or the two curl calls) as its reply tool. If the
-agent only reads files or messages, use the generic receiver and point it at the inbox file.
+## Where to read next
 
-## Fluxer gotchas
+- [Configuration, the webhook body, and the scripts](docs/reference.md)
+- [Wire an agent to the webhook](docs/agents.md)
+- [Fluxer is not Discord](docs/fluxer.md)
+- [Secrets](SECURITY.md)
 
-* The gateway is Discord-*shaped* but **not Discord-compatible**: `wss://<instance>/gateway?v=1&encoding=json` only
-  (`v=10` is rejected with close **4012**), no intents (use `ignored_events`), REST under `/api/v1`. Stock discord.py /
-  discord.js / serenity won't work; use Fluxer.js or a hand-rolled client.
-* **No slash commands, interactions or components.** Use prefix commands (`!ping`) or reactions.
-* **Resume needs a non-1000 close.** If the client closes with 1000, the server destroys the session and RESUME fails
-  (op 9). Fluxer.js 3.3.0 closes with 1000 on reconnects; `image/patches/apply-fluxerjs-ws-close-4000.mjs` changes those
-  to **4000** (resumable) while `destroy()` keeps 1000 for deliberate shutdown, which shows the bot offline within ~3–5 s.
-  A RESUME within 60 s replays missed events. After longer gaps the bridge re-IDENTIFYs and backfills via REST.
-* Heartbeat interval is ~41 s. A dropped socket is shown offline after ~5 s. Presence updates are limited to 5 per 20 s.
-* **Never `docker kill -s <signal>` the containers.** Docker then treats them as manually stopped and
-  `restart: unless-stopped` stops reviving them after a crash. Use `bin/reload.sh` (SIGHUP) and `bin/drill-reconnect.sh`
-  (SIGUSR2), which signal PID 1 through `docker exec`.
-* Bot token = `<app_id>.<secret>`, shown once. Resetting it kills all sessions. Bot user id = application id.
-* Adding a bot to a community needs Manage Community there. A non-public bot can only be added by its owner.
-* Some instances disable DMs; `include_dms` is then moot.
+`AUDIT-NOTES.md` records the private-to-public cut. It is not a setup guide.
 
-## Operate
-
-* Status: `sudo bin/list-bots.sh`. Full counters (`queued_by_reason`, `queued_by_event`, `filtered_by`, `last_queued`,
-  presence updates): `sudo docker exec fab-<owner> wget -qO- 127.0.0.1:8080/healthz`.
-* Activity: `sudo bin/status.sh <owner> <bot> show`. What Fluxer actually shows: `tools/presence-check.py --guild <id>`.
-* Logs: `sudo docker logs -f --since 10m fab-<owner>` (JSON lines, no secrets or bodies).
-* Supervision: `restart: unless-stopped`, Docker HEALTHCHECK, and an internal watchdog that exits (so Docker restarts it)
-  if a bot stays not-ready for more than 5 min or the event loop stalls for more than 30 s.
-
-## Development
+## Develop
 
 ```sh
 cd image && npm ci && node patches/apply-fluxerjs-ws-close-4000.mjs && npm run typecheck && npm test
 ```
-Tests use Node's built-in runner. They cover the filter (modes, reasons, ignore list, events), the activity state
-machine, presence precedence and rate caps, and a plugin test that drives `webhook-forward` against a local HTTP server.
-Plugins live in `image/src/plugins/` and register in `plugins/index.ts`. No code is loaded at runtime from owner dirs.
+
+Tests use Node's built-in runner. They do not open a Fluxer gateway. Plugins live in `image/src/plugins/` and register in `image/src/plugins/index.ts`. Owner directories are not loaded as code.
+
+Read `image/src/main.ts` first, then `image/src/bot.ts`, then `image/src/plugins/forward-filter.ts`, then `bin/add-bot.sh`.
+
+After a code change, rebuild and recreate the containers. `add-bot.sh` does not rebuild the image.
+
+```sh
+sudo docker build -t fluxer-agent-bridge:local image/ && sudo docker compose up -d
+```
 
 ## License
 
-MIT, see [LICENSE](LICENSE). Fluxer.js is Apache-2.0.
+MIT. See [LICENSE](LICENSE). Fluxer.js is Apache-2.0.

@@ -1,5 +1,7 @@
 # Audit notes: fluxer-agent-bridge vs. the private deployment
 
+This file is the private-to-public cut memo from 2026-10-19. It is not a setup guide. Start at README.md.
+
 This repo was cut on 2026-10-19 from the privately deployed `bot-bridge` (forward-all mode, ignore list, extra events,
 activity-status). These notes list what was left out, scrubbed or changed, so the owner can audit before going public.
 
@@ -38,6 +40,7 @@ README (architecture mermaid, quick start, config reference, payload schema, rep
 labels, Fluxer gotchas), LICENSE (MIT, **owner to confirm**), SECURITY.md, `.gitignore`, `bridge.env.example`,
 `owners.conf.example`, `examples/bot.toml`, `examples/secrets.env.example`, `examples/receivers/http_receiver.py` +
 `inbox_tail.sh`, GitHub Actions CI (npm ci, typecheck, tests, shell/python syntax, docker build).
+`examples/bot.toml` was a byte copy of `templates/bot.toml` and was removed so there is one config to read.
 
 ## Scans (run before the first commit and on the final history)
 * gitleaks 8.21.2: `detect --no-git` on the working tree (incl. node_modules) and `detect --log-opts=--all` on the git history: **no leaks found**.
