@@ -115,7 +115,8 @@ async function shutdown(sig: string) {
   log.info('shutting down', { signal: sig });
   await Promise.race([
     Promise.all([...bots.values()].map((b) => b.stop())),
-    new Promise((resolve) => setTimeout(resolve, 8000)),
+    // webhook-forward drains an in-flight POST for up to drain_seconds (8); compose stop_grace_period is 20s
+    new Promise((resolve) => setTimeout(resolve, 15000)),
   ]);
   process.exit(0);
 }

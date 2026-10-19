@@ -58,7 +58,7 @@ def make_server(a, token):
             msgs = batch.get("messages", [])
             if not isinstance(msgs, list): return self._send(400, {"error": "messages must be a list"})
             msgs = [m for m in msgs if isinstance(m, dict)]
-            key = self.headers.get("Idempotency-Key", "")
+            key = self.headers.get("Idempotency-Key", "") or str(batch.get("delivery_id") or "")
             with seen_lock:
                 if key and key in seen: return self._send(200, {"ok": True, "duplicate": True})
                 if key: seen.append(key); del seen[:-1000]

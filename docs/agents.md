@@ -53,6 +53,10 @@ python3 mcp/fluxer.py listen
 
 `listen` binds `127.0.0.1:8788` and needs `FLUXER_WEBHOOK_TOKEN`; without it nothing is bound. A container cannot dial that address. Point `WEBHOOK_URL` there only when the bridge process is on this machine. A bot whose URL still points at a hosted webhook routine does not wake this session.
 
+## Duplicates
+
+Delivery is at-least-once. A restart while a POST is unanswered re-sends that batch with the same `delivery_id` and `redelivery: true`. Skip any `messages[].dedupe_key` you have already handled (keep the last few thousand). `http_receiver.py` and `fluxer.py listen` already skip a repeated `delivery_id`. See [Webhook payload](reference.md#webhook-payload).
+
 ## Untrusted chat text
 
 Message text, names, filenames, emoji and tag names in a batch were written by whoever can post where the bot can see. `batch.trust.untrusted_paths` lists them. The Pi wake wraps them in `«fluxer:u»…«/fluxer:u»` and keeps ids on a header line; `trust_wrap = true` makes the bridge wrap them in the payload too (default off, see [Untrusted content](reference.md#untrusted-content)). Paste this into the agent's instructions (Pi, a hosted routine, a CLI agent):

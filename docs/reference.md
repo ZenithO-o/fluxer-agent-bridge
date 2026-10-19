@@ -119,6 +119,7 @@ everyone_is_ping = false
 hold = false
 test = false              # true forces test:true on every POST from this plugin
 trust_wrap = false        # true wraps untrusted strings in place as «fluxer:u»…«/fluxer:u». See Untrusted content
+drain_seconds = 8         # on stop, wait this long for an in-flight POST before exiting
 events = ["reactions", "member_join", "member_leave", "thread_create"]
 
 [plugins.ignore]
@@ -192,6 +193,16 @@ The command is the bot prefix plus `ping`, default `!ping`. There is no permissi
 
 A 4xx other than 408 or 429 pauses delivery until that bot process is created again.
 
+Delivery is at-least-once. Receivers SHOULD de-duplicate, because some webhook platforms drop custom headers, so do it on the body:
+
+| Field | Meaning |
+|---|---|
+| `delivery_id` | Top level. Same value as `Idempotency-Key`: 32 hex characters of a SHA-256 over the batch's `event:id` pairs. It does not change when the same batch is sent again. |
+| `messages[].dedupe_key` | Per event. `create:<message id>`, `delete:<message id>`, `edit:<message id>:<edited_timestamp>` (each edit is its own event), or the synthetic id (`reaction_add:<ms>:<seq>`) of a non-message event. Dedupe on this for belt-and-braces protection, since a batch can be regrouped. |
+| `redelivery: true` | Top level, only present on a re-send of a batch whose earlier POST got no answer (a restart mid-request, or a timeout). The header `X-Fluxer-Redelivery: 1` says the same. |
+
+On stop (container restart or a bot config change) the bridge starts no new batch and waits up to `drain_seconds` for an in-flight POST to be answered. `render-compose.sh` sets `stop_grace_period: 20s` so Docker does not kill it first. A batch that is still unanswered is kept, marked as in flight in `outbox.json`, and re-sent after the restart with the same `delivery_id` and `redelivery: true`. Keys and items that got a 2xx are kept in `state/<owner>/<bot>/webhook-forward/delivered.json` (the last 200 batches, 2000 items) and are never sent again.
+
 `WEBHOOK_KEY` without `WEBHOOK_AUTH` is sent as `Authorization: Bearer <key>` and as `X-Automation-Key`.
 
 ```json
@@ -202,6 +213,7 @@ A 4xx other than 408 or 429 pauses delivery until that bot process is created ag
   "bot": "alice_bot",
   "target": "alice_bot",
   "test": false,
+  "delivery_id": "3f1c0d6a9b2e4f7081a5c3d2e9f0b4a7",
   "trust": { "version": 1, "wrapped": false, "open": "«fluxer:u»", "close": "«/fluxer:u»", "escape": "double-guillemets",
              "untrusted_paths": ["messages[].content", "messages[].author.display_name", "…"] },
   "dropped_due_to_backlog": 0,
@@ -231,7 +243,8 @@ A 4xx other than 408 or 429 pauses delivery until that bot process is created ag
       "attachments": [],
       "reply_to": { "id": "100000000000000100", "author_id": "100000000000000001", "content": "first 500 chars" },
       "reference": { "message_id": "100000000000000100", "channel_id": "100000000000000030" },
-      "thread": null
+      "thread": null,
+      "dedupe_key": "create:100000000000000105"
     }
   ]
 }

@@ -411,7 +411,7 @@ class WebhookHandler(BaseHTTPRequestHandler):
             kept = [m for m in batch["messages"] if isinstance(m, dict)]
             skipped = len(batch["messages"]) - len(kept)
             batch["messages"] = kept
-        key = self.headers.get("Idempotency-Key", "")
+        key = self.headers.get("Idempotency-Key", "") or str(batch.get("delivery_id") or "")
         with SEEN_LOCK:
             if key and key in SEEN:
                 return self._send(200, {"ok": True, "duplicate": True})

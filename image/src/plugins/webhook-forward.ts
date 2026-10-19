@@ -15,9 +15,17 @@ import { BoundedMap, GATEWAY_EVENTS, MODES, THREAD_TYPES, decideDelete, decideEv
  * Filtering lives in forward-filter.ts (mode "all" is the default: every visible message except the bot's own).
  * Every POST carries a `trust` block naming the untrusted text fields; trust_wrap = true (default off) also wraps them
  * in place as «fluxer:u»…«/fluxer:u» (see untrusted.ts). The outbox always stores raw values.
+ * Delivery is at-least-once. On stop the loop takes no new batch and waits up to drain_seconds (8) for an in-flight POST.
+ * Each POST body carries `delivery_id` (= the Idempotency-Key, stable across redeliveries) and messages[].dedupe_key.
+ * A batch sent without a definitive answer is persisted as `inflight`; after a restart it is re-sent with the same
+ * delivery_id / Idempotency-Key, `redelivery: true` and `X-Fluxer-Redelivery: 1`. Keys and items that got a 2xx are kept in a small
+ * persisted ring (delivered.json) and never sent again.
  */
 interface Item { [k: string]: unknown; id: string }
-interface OutboxState { [k: string]: unknown; items: Item[]; dropped: number }
+/** inflight: the batch whose POST was sent and has no definitive answer yet (survives a restart). */
+interface Inflight { key: string; items: string[]; at: string; unknown: boolean }
+interface OutboxState { [k: string]: unknown; items: Item[]; dropped: number; inflight?: Inflight | null }
+interface DeliveredState { [k: string]: unknown; keys: string[]; items: string[] }
 interface CursorState { [k: string]: unknown; channels: Record<string, string> }
 
 const ids = toIdSet;
@@ -45,7 +53,7 @@ export default definePlugin({
     const includeBackfill = bool(c.include_backfill, true), everyoneIsPing = bool(c.everyone_is_ping, false);
     const hold = bool(c.hold, false), testFlag = bool(c.test, false), trustWrap = bool(c.trust_wrap, false);
     const batchMs = num(c.batch_seconds, 3) * 1000, maxPerPost = num(c.max_per_post, 50), outboxMax = num(c.outbox_max, 500);
-    const backfillMax = num(c.backfill_max, 50), maxPostBytes = num(c.max_post_bytes, 512 * 1024);
+    const backfillMax = num(c.backfill_max, 50), maxPostBytes = num(c.max_post_bytes, 512 * 1024), drainMs = num(c.drain_seconds, 8) * 1000;
     const url = ctx.secrets.WEBHOOK_URL || '';
     const auth = ctx.secrets.WEBHOOK_AUTH || (ctx.secrets.WEBHOOK_KEY ? `Bearer ${ctx.secrets.WEBHOOK_KEY}` : '');
     const legacyKey = ctx.secrets.WEBHOOK_AUTH ? '' : ctx.secrets.WEBHOOK_KEY || '';
@@ -53,6 +61,20 @@ export default definePlugin({
 
     const outbox = new JsonKV<OutboxState>(path.join(ctx.stateDir, 'outbox.json'), { items: [], dropped: 0 });
     const cursors = new JsonKV<CursorState>(path.join(ctx.stateDir, 'cursors.json'), { channels: {} });
+    const delivered = new JsonKV<DeliveredState>(path.join(ctx.stateDir, 'delivered.json'), { keys: [], items: [] });
+    const deliveredKeys = new Set(delivered.data.keys ?? []), deliveredItems = new Set(delivered.data.items ?? []);
+    /** Per-item dedupe key sent as messages[].dedupe_key: "create:<message id>" / "delete:<id>", "edit:<id>:<edited_timestamp>"
+     *  (each edit is its own event), and the synthetic id ("reaction_add:<ms>:<seq>") for non-message events. */
+    const itemKey = (it: Item) => (String(it.id).includes(':') ? String(it.id)
+      : it.event === 'edit' && it.edited_timestamp ? `edit:${it.id}:${it.edited_timestamp}` : `${it.event}:${it.id}`);
+    const idemKey = (batch: Item[], test = false) => crypto.createHash('sha256').update(batch.map((b) => `${b.event}:${b.id}`).join(',') + (test ? ':test' : '')).digest('hex').slice(0, 32);
+    function markDelivered(key: string, batch: Item[]) {
+      delivered.data.keys = [...(delivered.data.keys ?? []), key].slice(-200);
+      delivered.data.items = [...(delivered.data.items ?? []), ...batch.map(itemKey)].slice(-2000);
+      deliveredKeys.clear(); for (const k of delivered.data.keys) deliveredKeys.add(k);
+      deliveredItems.clear(); for (const k of delivered.data.items) deliveredItems.add(k);
+      delivered.flush();
+    }
     const recent = new Set<string>(); const recentQ: string[] = [];
     const remember = (k: string) => { if (recent.has(k)) return false; recent.add(k); recentQ.push(k); if (recentQ.length > 2000) recent.delete(recentQ.shift()!); return true; };
 
@@ -64,7 +86,7 @@ export default definePlugin({
     const refCache = new BoundedMap<string | null>(500); // referenced message id -> author id (REST fallback)
 
     const st = { state: !url ? 'not-configured' : hold ? 'held' : 'ready', lastDelivery: null as null | string, lastError: null as null | string,
-      failedRounds: 0, forwarded: 0, filtered: 0, backfilled: 0, paused: false, posts: 0,
+      failedRounds: 0, forwarded: 0, filtered: 0, backfilled: 0, paused: false, posts: 0, redelivered: 0, skipped_delivered: 0,
       queued_by_reason: {} as Record<string, number>, queued_by_event: {} as Record<string, number>, filtered_by: {} as Record<string, number>,
       last_queued: null as null | { event: string; id: string; channel: string; reason: string; author_bot: boolean; at: string } };
     const bump = (o: Record<string, number>, k: string) => { o[k] = (o[k] ?? 0) + 1; };
@@ -286,13 +308,16 @@ export default definePlugin({
     const wake = () => { const f = wakeFn; wakeFn = null; f?.(); };
     const waitWake = (ms: number) => new Promise<void>((r) => { const t = setTimeout(() => { wakeFn = null; r(); }, ms); wakeFn = () => { clearTimeout(t); r(); }; });
 
-    async function post(batch: Item[], extra: Record<string, unknown> = {}): Promise<{ ok: boolean; status: number; permanent: boolean }> {
+    async function post(batch: Item[], extra: Record<string, unknown> = {}, redelivery = false): Promise<{ ok: boolean; status: number; permanent: boolean }> {
       const body = JSON.stringify({
         source: 'fluxer-agent-bridge', schema: 2, owner: ctx.bot.owner, bot: ctx.bot.name, target: ctx.bot.name, test: testFlag,
-        trust: trustBlock(trustWrap), messages: trustWrap ? batch.map(wrapItem) : batch, ...(outbox.data.dropped ? { dropped_due_to_backlog: outbox.data.dropped } : {}), ...extra,
+        delivery_id: idemKey(batch, !!extra.test),
+        trust: trustBlock(trustWrap), messages: batch.map((it) => ({ ...(trustWrap ? wrapItem(it) : it), dedupe_key: itemKey(it) })), ...(outbox.data.dropped ? { dropped_due_to_backlog: outbox.data.dropped } : {}),
+        ...(redelivery ? { redelivery: true } : {}), ...extra,
       });
       const headers: Record<string, string> = { 'Content-Type': 'application/json', 'User-Agent': 'fluxer-agent-bridge/1.0',
-        'Idempotency-Key': crypto.createHash('sha256').update(batch.map((b) => `${b.event}:${b.id}`).join(',') + (extra.test ? ':test' : '')).digest('hex').slice(0, 32) };
+        'Idempotency-Key': idemKey(batch, !!extra.test) };
+      if (redelivery) headers['X-Fluxer-Redelivery'] = '1';
       if (auth) headers.Authorization = auth;
       if (legacyKey) headers['X-Automation-Key'] = legacyKey;
       try {
@@ -303,43 +328,90 @@ export default definePlugin({
       } catch (e) { return { ok: false, status: 0, permanent: false }; }
     }
 
+    // stop-aware sleep: resolves early once teardown starts, so no new batch or retry begins after stop
+    const stopWaiters = new Set<() => void>();
+    const stopSleep = (ms: number) => new Promise<void>((r) => {
+      if (stopped) return r();
+      const done = () => { clearTimeout(t); stopWaiters.delete(done); r(); };
+      const t = setTimeout(done, ms); stopWaiters.add(done);
+    });
+
+    /** One delivery round. Returns false when the loop should back off. */
+    async function round(): Promise<boolean> {
+      // drop items that already got a 2xx (e.g. a crash after the answer, before the outbox was saved)
+      const before = outbox.data.items.length;
+      outbox.data.items = outbox.data.items.filter((it) => !deliveredItems.has(itemKey(it)));
+      if (outbox.data.items.length !== before) {
+        st.skipped_delivered += before - outbox.data.items.length; outbox.flush();
+        ctx.log.warn('skipped items already delivered', { count: before - outbox.data.items.length });
+      }
+      if (!outbox.data.items.length) return true;
+      // whole-guild forwarding: cap each POST by count and by size (one oversized message still goes alone)
+      const batch: Item[] = []; let bytes = 0;
+      for (const it of outbox.data.items.slice(0, maxPerPost)) {
+        const n = Buffer.byteLength(JSON.stringify(trustWrap ? wrapItem(it) : it));
+        if (batch.length && bytes + n > maxPostBytes) break;
+        batch.push(it); bytes += n;
+      }
+      const key = idemKey(batch);
+      if (deliveredKeys.has(key)) {
+        outbox.data.items.splice(0, batch.length); outbox.data.inflight = null; outbox.flush();
+        st.skipped_delivered += batch.length; ctx.log.warn('skipped a batch whose key already got a 2xx', { count: batch.length });
+        return true;
+      }
+      const prev = outbox.data.inflight;
+      const ids = batch.map(itemKey);
+      let redelivery = !!prev && prev.unknown && (prev.key === key || ids.some((i) => prev.items.includes(i)));
+      let sentAsRedelivery = false;
+      let res = { ok: false, status: 0, permanent: false };
+      for (let i = 0; i < 5; i++) {
+        if (i > 0 && stopped) break;
+        outbox.data.inflight = { key, items: ids, at: new Date().toISOString(), unknown: true }; outbox.flush();
+        if (redelivery) { st.redelivered++; sentAsRedelivery = true; ctx.log.warn('redelivering a batch whose earlier POST had no answer', { count: batch.length, key }); }
+        const p = post(batch, {}, redelivery);
+        res = await p;
+        if (closed) return true; // teardown already gave up on this POST; a new instance owns the state files now
+        if (res.ok || res.permanent) break;
+        // a status means the receiver answered without storing it; status 0 = no answer, the receiver may have it
+        if (res.status) { outbox.data.inflight = { key, items: ids, at: new Date().toISOString(), unknown: false }; outbox.flush(); }
+        redelivery = res.status === 0;
+        if (stopped) break;
+        await stopSleep(1000 * 2 ** i * (0.75 + Math.random() * 0.5));
+      }
+      st.posts++;
+      if (res.ok) {
+        markDelivered(key, batch);
+        outbox.data.items.splice(0, batch.length); outbox.data.dropped = 0; outbox.data.inflight = null; outbox.flush();
+        st.forwarded += batch.length; st.failedRounds = 0; st.lastError = null; st.lastDelivery = `HTTP ${res.status} at ${new Date().toISOString()}`;
+        ctx.log.info('delivered', { count: batch.length, status: res.status, remaining: outbox.data.items.length, ...(sentAsRedelivery ? { redelivery: true } : {}) });
+        ctx.emit('bb:delivered', { status: res.status, items: batch });
+        refreshHealth();
+        return true;
+      }
+      st.lastError = `HTTP ${res.status || 'network error'} at ${new Date().toISOString()}`;
+      if (res.permanent) {
+        outbox.data.inflight = null; outbox.flush();
+        st.paused = true; st.state = 'paused';
+        ctx.log.error('webhook rejected the batch; delivery paused until this bot process restarts', { status: res.status });
+        ctx.health.degrade(`webhook HTTP ${res.status}`, 'dnd');
+        return true;
+      }
+      st.failedRounds++;
+      ctx.log.warn('delivery round failed', { status: res.status, rounds: st.failedRounds, queued: outbox.data.items.length });
+      refreshHealth();
+      return false;
+    }
+
+    let current: Promise<boolean> | null = null, closed = false;
     async function loop() {
       while (!stopped) {
         if (!url || hold || st.paused || outbox.data.items.length === 0) { await waitWake(60000); continue; }
-        await sleep(batchMs);
-        // whole-guild forwarding: cap each POST by count and by size (one oversized message still goes alone)
-        const batch: Item[] = []; let bytes = 0;
-        for (const it of outbox.data.items.slice(0, maxPerPost)) {
-          const n = Buffer.byteLength(JSON.stringify(trustWrap ? wrapItem(it) : it));
-          if (batch.length && bytes + n > maxPostBytes) break;
-          batch.push(it); bytes += n;
-        }
-        let res = { ok: false, status: 0, permanent: false };
-        for (let i = 0; i < 5 && !stopped; i++) {
-          res = await post(batch);
-          if (res.ok || res.permanent) break;
-          await sleep(1000 * 2 ** i * (0.75 + Math.random() * 0.5));
-        }
-        st.posts++;
-        if (res.ok) {
-          outbox.data.items.splice(0, batch.length); outbox.data.dropped = 0; outbox.save(0);
-          st.forwarded += batch.length; st.failedRounds = 0; st.lastError = null; st.lastDelivery = `HTTP ${res.status} at ${new Date().toISOString()}`;
-          ctx.log.info('delivered', { count: batch.length, status: res.status, remaining: outbox.data.items.length });
-          ctx.emit('bb:delivered', { status: res.status, items: batch });
-          refreshHealth();
-          continue;
-        }
-        st.lastError = `HTTP ${res.status || 'network error'} at ${new Date().toISOString()}`;
-        if (res.permanent) {
-          st.paused = true; st.state = 'paused';
-          ctx.log.error('webhook rejected the batch; delivery paused until this bot process restarts', { status: res.status });
-          ctx.health.degrade(`webhook HTTP ${res.status}`, 'dnd');
-          continue;
-        }
-        st.failedRounds++;
-        ctx.log.warn('delivery round failed', { status: res.status, rounds: st.failedRounds, queued: outbox.data.items.length });
-        refreshHealth();
-        await waitWake(60000 * (1 + Math.random() * 9));
+        await stopSleep(batchMs);
+        if (stopped) break; // draining: take no new batch
+        current = round();
+        const ok = await current;
+        current = null;
+        if (!ok && !stopped) await waitWake(60000 * (1 + Math.random() * 9));
       }
     }
     function refreshHealth() {
@@ -353,6 +425,18 @@ export default definePlugin({
     else if (hold) ctx.health.setNote('webhook held');
     void loop();
 
-    return { teardown() { stopped = true; wake(); outbox.flush(); cursors.flush(); ownState.data.ids = ownIds.keys(); ownState.flush(); } };
+    return {
+      /** Drain: no new batch starts; an in-flight round gets up to drain_seconds to finish (its 2xx is recorded). */
+      async teardown() {
+        stopped = true; wake(); for (const f of [...stopWaiters]) f(); stopWaiters.clear();
+        if (current) {
+          const t0 = Date.now();
+          const finished = await Promise.race([current.then(() => true), sleep(drainMs).then(() => false)]);
+          ctx.log.info(finished ? 'drained' : 'drain timed out; batch kept for redelivery', { ms: Date.now() - t0, inflight: !!outbox.data.inflight });
+        }
+        closed = true;
+        outbox.flush(); cursors.flush(); delivered.flush(); ownState.data.ids = ownIds.keys(); ownState.flush();
+      },
+    };
   },
 });

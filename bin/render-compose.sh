@@ -16,6 +16,7 @@ OUT=$BB/compose.yml.new
     build: ./image
     container_name: $PREFIX-$owner
     restart: unless-stopped
+    stop_grace_period: 20s
     user: "$uid:$uid"
     read_only: true
     cap_drop: [ALL]
