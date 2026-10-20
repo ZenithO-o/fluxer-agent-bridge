@@ -8,12 +8,14 @@ import path from 'node:path';
 import plugin from '../dist/plugins/webhook-forward.js';
 
 const SELF = '100000000000000001', PUB = '1561622443464851456', INTERNAL = '1561216435596820481';
-const CH = { '70': { id: '70', name: 'public-chat', type: 0, guild_id: PUB, last_message_id: '99' }, '80': { id: '80', name: 'internal', type: 0, guild_id: INTERNAL } };
+const EMOJI = '1561987178181951488';
+const CH = { '70': { id: '70', name: 'public-chat', type: 0, guild_id: PUB, last_message_id: '99' }, '80': { id: '80', name: 'internal', type: 0, guild_id: INTERNAL },
+  [EMOJI]: { id: EMOJI, name: 'add-emojis', type: 0, guild_id: PUB }, '75': { id: '75', name: 'add-emojis-thread', type: 11, guild_id: PUB, parent_id: EMOJI } };
 const MSGS = { '70/10': { id: '10', channel_id: '70', author: { id: SELF, bot: true }, content: 'bot said' }, '70/11': { id: '11', channel_id: '70', author: { id: '901' }, content: 'other said' } };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const u = (id) => ({ id, username: `u${id}` });
 
-async function start({ backfill = [] } = {}) {
+async function start({ backfill = [], guilds = { [PUB]: { forward: 'mentions' } } } = {}) {
   const got = [];
   const srv = http.createServer((req, res) => { let b = ''; req.on('data', (c) => (b += c)); req.on('end', () => { got.push(...JSON.parse(b).messages); res.writeHead(200).end('{}'); }); });
   await new Promise((r) => srv.listen(0, '127.0.0.1', r));
@@ -31,7 +33,7 @@ async function start({ backfill = [] } = {}) {
   } };
   const ctx = {
     client: { rest, guilds: new Map(backfill.length ? [[PUB, {}]] : []) },
-    bot: { name: 'zenith_bot', owner: 'zenith', userId: () => SELF, config: { guilds: { [PUB]: { forward: 'mentions' } } } },
+    bot: { name: 'zenith_bot', owner: 'zenith', userId: () => SELF, config: { guilds } },
     config: { use: 'webhook-forward', mode: 'all', batch_seconds: 0.05, events: ['reactions', 'members', 'threads'] },
     secrets: { WEBHOOK_URL: `http://127.0.0.1:${srv.address().port}/hook`, WEBHOOK_AUTH: 'Bearer t' },
     log: { info() {}, warn() {}, error() {}, debug() {} }, stateDir,
@@ -75,5 +77,26 @@ test('backfill applies the same filter', async () => {
   ] });
   await b.session(); await sleep(400); await b.stop();
   assert.deepEqual(b.got.map((m) => `${m.id}:${m.reason}:${m.backfill === true}`), ['41:ping:true']);
+  assert.equal(b.status().filtered_by['guild.mentions'], 2);
+});
+
+test('per-channel: #add-emojis forward = "all" inside the mentions guild; threads inherit; other channels stay mentions-only', async () => {
+  const b = await start({ guilds: { [PUB]: { forward: 'mentions', channels: { [EMOJI]: { forward: 'all' } } } } });
+  const P = (id, ch, over = {}) => ({ id, channel_id: ch, guild_id: PUB, author: u('900'), mentions: [], content: 'x', timestamp: 'T', ...over });
+  await b.fire('MESSAGE_CREATE', P('50', EMOJI, { content: 'please add https://emoji.gg/emoji/1-x' }));   // channel all -> all
+  await b.fire('MESSAGE_CREATE', P('51', '75'));                                                        // thread under #add-emojis -> all
+  await b.fire('MESSAGE_CREATE', P('52', '70'));                                                        // #public-chat chatter -> dropped
+  await b.fire('MESSAGE_CREATE', P('53', '70', { mentions: [{ id: SELF }] }));                          // #public-chat mention -> ping
+  await b.fire('MESSAGE_UPDATE', P('50', EMOJI, { content: 'edited', edited_timestamp: 'E1' }));        // edit in channel all -> all
+  await b.fire('MESSAGE_UPDATE', P('52', '70', { content: 'edited', edited_timestamp: 'E2' }));         // edit of dropped -> dropped
+  await b.fire('MESSAGE_REACTION_ADD', { user_id: '900', channel_id: EMOJI, message_id: '50', guild_id: PUB, emoji: { name: 'x' } }); // reaction in channel all -> all
+  await b.fire('GUILD_MEMBER_ADD', { guild_id: PUB, user: u('905'), roles: [] });                       // guild-wide event -> guild policy (dropped)
+  await b.fire('MESSAGE_DELETE', { id: '50', channel_id: EMOJI, guild_id: PUB });                       // delete in channel all -> all
+  await sleep(500); await b.stop();
+  assert.deepEqual(b.got.map((m) => `${m.event}:${m.event.startsWith('reaction') ? m.message_id : m.id}:${m.reason}`),
+    ['create:50:all', 'create:51:all', 'create:53:ping', 'edit:50:all', 'reaction_add:50:all', 'delete:50:all']);
+  const q = JSON.parse(fs.readFileSync(path.join(b.stateDir, 'qualified.json'), 'utf8')).ids.map(([i]) => i);
+  assert.deepEqual(q, ['53'], 'only mentions-policy messages are tracked as qualified');
+  assert.equal(b.got[1].parent_channel_id, EMOJI);
   assert.equal(b.status().filtered_by['guild.mentions'], 2);
 });

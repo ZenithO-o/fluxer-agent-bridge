@@ -2,7 +2,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { parse } from 'smol-toml';
-import { decideMessage, decideDelete, decideEvent, parseEvents, nickOf, parseIgnore, parseGuilds, toIdSet, BoundedMap } from '../dist/plugins/forward-filter.js';
+import { decideMessage, decideDelete, decideEvent, parseEvents, nickOf, parseIgnore, parseGuilds, policyFor, toIdSet, BoundedMap } from '../dist/plugins/forward-filter.js';
 
 const SELF = '100000000000000001', OTHERBOT = '100000000000000002', USER = '900', G = '100000000000000010';
 const HOME = '100000000000000020', OTHERCH = '100000000000000030', GENERAL = '111', THREAD = '222';
@@ -174,4 +174,69 @@ test('parseGuilds: ids, unknown keys, and an unknown forward value fails closed 
   assert.equal(r.warnings.length, 3);
   assert.equal(parseGuilds(undefined).policies.size, 0);
   assert.deepEqual(parseGuilds(parse('[guilds."1"]\nrole_mentions = true').guilds).policies.get('1'), { forward: undefined, role_mentions: true, everyone: false, reactions_to_bot: false });
+});
+
+// ---------- per-channel policy: [guilds."<gid>".channels."<cid>"] ----------
+
+const EMOJI = '1561987178181951488', FORUM = '333', POST = '334', POST2 = '335', QUIET = '336';
+const copts = (toml, qualified = new Map(), over = {}) => opts({ guilds: parseGuilds(parse(toml).guilds).policies, qualified, ...over });
+const CTOML = `[guilds."${PUB}"]\nforward = "mentions"\n[guilds."${PUB}".channels."${EMOJI}"]\nforward = "all"\n`
+  + `[guilds."${PUB}".channels."${FORUM}"]\nforward = "all"\n[guilds."${PUB}".channels."${POST2}"]\nforward = "mentions"\n[guilds."${PUB}".channels."${QUIET}"]\nforward = "none"\n`;
+
+test('channel all inside a mentions guild: every message in that channel is forwarded; the rest of the guild stays mentions-only', () => {
+  const o = copts(CTOML);
+  assert.equal(reason(decideMessage(pub({ channel_id: EMOJI, content: 'add :yippee:' }), null, o)), 'all');
+  assert.equal(reason(decideMessage(pub({ channel_id: EMOJI, mentions: [{ id: SELF }] }), null, o)), 'ping', 'a mention there is still ping');
+  assert.equal(reason(decideMessage(pub({ channel_id: GENERAL, content: 'chatter' }), null, o)), 'DROP:guild.mentions');
+  assert.equal(reason(decideMessage(pub({ channel_id: GENERAL, mentions: [{ id: SELF }] }), null, o)), 'ping');
+  assert.equal(reason(decideMessage(pub({ channel_id: QUIET, mentions: [{ id: SELF }] }), null, o)), 'DROP:guild.none', 'channel none drops even a mention');
+});
+test('threads and forum posts inherit the parent channel unless they have their own entry', () => {
+  const o = copts(CTOML);
+  assert.equal(reason(decideMessage(pub({ channel_id: POST }), FORUM, o)), 'all', 'post inherits parent all');
+  assert.equal(reason(decideMessage(pub({ channel_id: POST2 }), FORUM, o)), 'DROP:guild.mentions', 'own entry beats parent');
+  assert.equal(reason(decideMessage(pub({ channel_id: POST2, mentions: [{ id: SELF }] }), FORUM, o)), 'ping');
+  assert.equal(reason(decideMessage(pub({ channel_id: '999' }), GENERAL, o)), 'DROP:guild.mentions', 'thread under an unlisted channel uses the guild');
+});
+test('channel policy: edits and deletes follow the effective policy', () => {
+  const o = copts(CTOML, new Map([['55', 'ping']]));
+  assert.equal(reason(decideMessage(pub({ id: '60', channel_id: EMOJI }), null, o, 'edit')), 'all');
+  assert.equal(reason(decideDelete({ id: '60', channel_id: EMOJI, guild_id: PUB }, null, null, o)), 'all');
+  assert.equal(reason(decideDelete({ id: '61', channel_id: POST, guild_id: PUB }, FORUM, null, o)), 'all');
+  assert.equal(reason(decideMessage(pub({ id: '62', channel_id: GENERAL }), null, o, 'edit')), 'DROP:guild.mentions');
+  assert.equal(reason(decideMessage(pub({ id: '55', channel_id: GENERAL }), null, o, 'edit')), 'ping');
+  assert.equal(reason(decideDelete({ id: '62', channel_id: GENERAL, guild_id: PUB }, null, null, o)), 'DROP:guild.mentions');
+});
+test('channel policy: events in an all channel follow the normal rules; guild-wide events keep the guild policy', () => {
+  const o = copts(CTOML);
+  const e = (over = {}) => ({ channelId: EMOJI, parentId: null, guildId: PUB, actor: { id: USER, bot: false }, toBot: false, ...over });
+  assert.equal(reason(decideEvent('reaction_add', e(), o)), 'all');
+  assert.equal(reason(decideEvent('thread_create', e({ channelId: POST, parentId: FORUM }), o)), 'all');
+  assert.equal(reason(decideEvent('reaction_add', e({ channelId: GENERAL }), o)), 'DROP:guild.mentions');
+  assert.equal(reason(decideEvent('member_join', e({ channelId: null }), o)), 'DROP:guild.mentions');
+});
+test('channel keys inherit key by key: thread entry, then parent entry, then guild', () => {
+  const t = `[guilds."${PUB}"]\nforward = "mentions"\neveryone = true\n[guilds."${PUB}".channels."${FORUM}"]\nrole_mentions = true\neveryone = false\n`
+    + `[guilds."${PUB}".channels."${POST}"]\nreactions_to_bot = true\n`;
+  const o = copts(t);
+  assert.equal(reason(decideMessage(pub({ channel_id: POST, mention_roles: ['r1'] }), FORUM, o)), 'ping', 'role_mentions from parent');
+  assert.equal(reason(decideMessage(pub({ channel_id: POST, mention_everyone: true }), FORUM, o)), 'DROP:guild.mentions', 'everyone=false from parent beats guild');
+  assert.equal(reason(decideMessage(pub({ channel_id: GENERAL, mention_everyone: true }), null, o)), 'ping', 'guild everyone elsewhere');
+  assert.equal(reason(decideEvent('reaction_add', { channelId: POST, parentId: FORUM, guildId: PUB, actor: { id: USER, bot: false }, toBot: true }, o)), 'reaction-to-bot');
+  assert.equal(reason(decideEvent('reaction_add', { channelId: FORUM, parentId: null, guildId: PUB, actor: { id: USER, bot: false }, toBot: true }, o)), 'DROP:guild.mentions');
+});
+test('channel table without a guild forward; guild without channels is unchanged', () => {
+  const o = copts(`[guilds."${PUB}".channels."${QUIET}"]\nforward = "none"\n`);
+  assert.equal(reason(decideMessage(pub({ channel_id: GENERAL }), null, o)), 'all');
+  assert.equal(reason(decideMessage(pub({ channel_id: QUIET }), null, o)), 'DROP:guild.none');
+  assert.equal(policyFor(parseGuilds(parse(`[guilds."${PUB}"]\nforward = "mentions"`).guilds).policies, PUB, GENERAL, null).source, 'guild');
+  assert.equal(parseGuilds(parse(`[guilds."${PUB}"]\nforward = "mentions"`).guilds).policies.get(PUB).channels, undefined, 'no channels key added');
+});
+test('parseGuilds channels: bad ids, unknown keys and unknown forward warn; unknown forward fails closed to mentions', () => {
+  const r = parseGuilds(parse(`[guilds."1"]\nforward = "mentions"\n[guilds."1".channels."2"]\nforward = "everything"\ncolour = 1\n[guilds."1".channels.general]\nforward = "all"`).guilds);
+  assert.equal(r.policies.get('1').channels.get('2').forward, 'mentions');
+  assert.equal(r.policies.get('1').channels.has('general'), false);
+  assert.equal(r.warnings.length, 3);
+  assert.equal(policyFor(r.policies, '1', '2', null).source, 'channel');
+  assert.equal(policyFor(r.policies, '1', '7', '2').source, 'parent');
 });

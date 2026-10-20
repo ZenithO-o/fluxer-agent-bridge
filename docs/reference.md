@@ -115,6 +115,26 @@ reactions_to_bot = false         # mentions: also forward reactions on the bot's
 
 The bot-wide hard drops still run first (own messages, `skip_authors`, `include_bots`, `channels`, `skip_channels`). In `mentions` mode the ignore list drops only with `strict = true`, as for any mention. The bot-wide `everyone_is_ping` and role mentions do not apply inside a `mentions` guild; use the table's own keys. Dropped items count as `guild.mentions` or `guild.none` in `filtered_by`. An unknown `forward` value logs a warning and is treated as `mentions`. Unknown keys log a warning. More per-guild keys (for example presence or a reaction policy) will be added to this table. The payload is unchanged.
 
+#### Per-channel overrides
+
+A guild table can hold one sub-table per channel id, with the same keys. It overrides the guild table for that channel. A thread or forum post uses its own entry if it has one, else its parent channel's entry, else the guild table. Each key is resolved separately in that order, so a channel entry that sets only `role_mentions` keeps the guild's `forward`.
+
+```toml
+[guilds."1561622443464851456"]
+forward = "mentions"                               # the rest of the server: mentions and replies only
+
+[guilds."1561622443464851456".channels."1561987178181951488"]
+forward = "all"                                    # #add-emojis and its threads: every message
+```
+
+- `forward = "all"` on a channel means the bot's normal behaviour there (its `mode`, `home_channels` and ignore list), exactly like a guild set to `all`. With `mode = "all"` that is every message, `reason: "all"` (or `home`, `ping`, `reply-to-bot` as usual). No new reasons or payload fields.
+- `mentions` and `none` on a channel work as they do for a guild. Messages that qualify under `mentions` are tracked in `qualified.json`. Messages in an `all` channel are not tracked; their edits and deletes follow the normal rules.
+- Edits, deletes, reactions, thread and typing events use the policy of the channel they happen in. Guild-wide events with no channel (joins, leaves, member updates, bans) use the guild table.
+- Hard drops (`channels`, `skip_channels`, `skip_authors`, `include_bots`) still run first. A channel table with no `forward` in the guild table above it still works; channels without an entry then keep the bot's normal behaviour.
+- A bad channel id or a non-table entry is skipped with a warning, unknown keys warn, and an unknown `forward` value is treated as `mentions`. The startup log lists the per-channel policies.
+
+`filter-check` resolves the same chain and prints which entry set the policy (`from channel`, `from parent` or `from guild`).
+
 Check a policy against real traffic without sending anything (GET requests only, prints ids and decisions, never text):
 
 ```sh

@@ -13,6 +13,10 @@
  * that guild. forward = "mentions" uses only structured data: the bot's id in `mentions`, a reply to the bot's own
  * message (referenced_message.author.id / own-message ids / REST lookup), and, only when enabled, a role the bot holds
  * or @everyone/@here. Message text is never inspected.
+ *
+ * Per-channel policy ([guilds."<gid>".channels."<cid>"], same keys) overrides the guild table for that channel. A thread
+ * or forum post uses its own entry if it has one, else its parent channel's, else the guild's (key by key; see policyFor).
+ * forward = "all" on a channel means the bot's normal behaviour there (same as guild "all"), so reasons are unchanged.
  */
 export type Mode = 'all' | 'pings-only' | 'pings-and-home';
 export const MODES: readonly Mode[] = ['all', 'pings-only', 'pings-and-home'];
@@ -52,27 +56,76 @@ export interface GuildPolicy {
   role_mentions: boolean;          // mentions mode: a mention of a role the bot holds counts (default false)
   everyone: boolean;               // mentions mode: @everyone / @here counts (default false)
   reactions_to_bot: boolean;       // mentions mode: forward reactions on the bot's own messages (default false)
+  /** [guilds."<gid>".channels."<cid>"] overrides; unset keys fall back to the parent channel's entry, then the guild. */
+  channels?: Map<string, ChannelPolicy>;
 }
-export const GUILD_KEYS = ['forward', 'role_mentions', 'everyone', 'reactions_to_bot'];
+/** One [guilds."<gid>".channels."<cid>"] table. Every key is optional; unset = inherit. */
+export interface ChannelPolicy { forward?: GuildForward; role_mentions?: boolean; everyone?: boolean; reactions_to_bot?: boolean }
+export const CHANNEL_KEYS = ['forward', 'role_mentions', 'everyone', 'reactions_to_bot'];
+export const GUILD_KEYS = [...CHANNEL_KEYS, 'channels'];
+const ID_RE = /^[0-9]{1,25}$/;
+const isTable = (v: unknown): v is Record<string, unknown> => !!v && typeof v === 'object' && !Array.isArray(v);
+function parseForward(v: unknown, where: string, warnings: string[]): GuildForward | undefined {
+  if (v === undefined) return undefined;
+  const f = String(v).toLowerCase();
+  const forward: GuildForward | undefined = f === 'all' || f === 'none' ? f : f === 'mentions' || f === 'mention' ? 'mentions' : undefined;
+  if (forward) return forward;
+  warnings.push(`${where}: unknown forward "${String(v)}", using "mentions"`);
+  return 'mentions';
+}
+const optBool = (v: unknown) => (v === undefined ? undefined : v === true);
 /** Parse the top-level [guilds] table. Bad ids are skipped; an unknown forward value fails closed to "mentions". */
 export function parseGuilds(v: unknown): { policies: Map<string, GuildPolicy>; warnings: string[] } {
   const policies = new Map<string, GuildPolicy>(); const warnings: string[] = [];
   const t = (v && typeof v === 'object' && !Array.isArray(v) ? v : {}) as Record<string, unknown>;
   for (const [gid, raw] of Object.entries(t)) {
-    if (!/^[0-9]{1,25}$/.test(gid)) { warnings.push(`guilds: "${gid}" is not a guild id (skipped)`); continue; }
-    const g = (raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {}) as Record<string, unknown>;
+    if (!ID_RE.test(gid)) { warnings.push(`guilds: "${gid}" is not a guild id (skipped)`); continue; }
+    const g = (isTable(raw) ? raw : {}) as Record<string, unknown>;
     for (const k of Object.keys(g)) if (!GUILD_KEYS.includes(k)) warnings.push(`guilds."${gid}": unknown key "${k}" (ignored)`);
-    let forward: GuildForward | undefined;
-    if (g.forward !== undefined) {
-      const f = String(g.forward).toLowerCase();
-      forward = f === 'all' || f === 'none' ? f : f === 'mentions' || f === 'mention' ? 'mentions' : undefined;
-      if (!forward) { forward = 'mentions'; warnings.push(`guilds."${gid}": unknown forward "${String(g.forward)}", using "mentions"`); }
+    const forward = parseForward(g.forward, `guilds."${gid}"`, warnings);
+    const pol: GuildPolicy = { forward, role_mentions: g.role_mentions === true, everyone: g.everyone === true, reactions_to_bot: g.reactions_to_bot === true };
+    if (g.channels !== undefined) {
+      if (!isTable(g.channels)) warnings.push(`guilds."${gid}".channels: not a table (ignored)`);
+      else {
+        const chans = new Map<string, ChannelPolicy>();
+        for (const [cid, craw] of Object.entries(g.channels)) {
+          const where = `guilds."${gid}".channels."${cid}"`;
+          if (!ID_RE.test(cid)) { warnings.push(`guilds."${gid}".channels: "${cid}" is not a channel id (skipped)`); continue; }
+          if (!isTable(craw)) { warnings.push(`${where}: not a table (skipped)`); continue; }
+          for (const k of Object.keys(craw)) if (!CHANNEL_KEYS.includes(k)) warnings.push(`${where}: unknown key "${k}" (ignored)`);
+          chans.set(cid, { forward: parseForward(craw.forward, where, warnings), role_mentions: optBool(craw.role_mentions),
+            everyone: optBool(craw.everyone), reactions_to_bot: optBool(craw.reactions_to_bot) });
+        }
+        if (chans.size) pol.channels = chans;
+      }
     }
-    policies.set(gid, { forward, role_mentions: g.role_mentions === true, everyone: g.everyone === true, reactions_to_bot: g.reactions_to_bot === true });
+    policies.set(gid, pol);
   }
   return { policies, warnings };
 }
-const policyOf = (o: FilterOpts, gid: string | null | undefined) => (gid && o.guilds ? o.guilds.get(String(gid)) : undefined);
+/**
+ * Effective policy for a channel: each key comes from the channel's own entry (a thread or forum post's id), else its
+ * parent channel's entry, else the guild table. No guild table = undefined (the bot's normal behaviour). `source` says
+ * which entry set `forward` ("channel", "parent", "guild"), for logs and filter-check.
+ */
+export function policyFor(guilds: Map<string, GuildPolicy> | undefined, gid: string | null | undefined, cid?: string | null,
+  parentId?: string | null): (GuildPolicy & { source: 'channel' | 'parent' | 'guild' }) | undefined {
+  const g = gid && guilds ? guilds.get(String(gid)) : undefined;
+  if (!g) return undefined;
+  const own = cid ? g.channels?.get(String(cid)) : undefined;
+  const par = parentId && String(parentId) !== String(cid ?? '') ? g.channels?.get(String(parentId)) : undefined;
+  if (!own && !par) return { ...g, source: 'guild' };
+  const pick = <K extends keyof ChannelPolicy>(k: K) => own?.[k] ?? par?.[k];
+  return {
+    forward: pick('forward') ?? g.forward,
+    role_mentions: pick('role_mentions') ?? g.role_mentions,
+    everyone: pick('everyone') ?? g.everyone,
+    reactions_to_bot: pick('reactions_to_bot') ?? g.reactions_to_bot,
+    channels: g.channels,
+    source: own?.forward !== undefined ? 'channel' : par?.forward !== undefined ? 'parent' : 'guild',
+  };
+}
+const policyOf = (o: FilterOpts, gid: string | null | undefined, cid?: string | null, parentId?: string | null) => policyFor(o.guilds, gid, cid, parentId);
 /** Structured mention for a mentions-mode guild: user id in mentions[], and roles / @everyone only when enabled. */
 export function isGuildMention(m: MsgLike, o: FilterOpts, p: GuildPolicy): boolean {
   const self = o.selfId;
@@ -127,7 +180,7 @@ export function decideMessage(m: MsgLike, parentId: string | null, o: FilterOpts
     if (inSet(o.deny)) return drop('skip_channels');
   }
 
-  const pol = policyOf(o, m.guild_id);
+  const pol = policyOf(o, m.guild_id, cid, parentId);
   if (pol?.forward === 'none') return drop('guild.none');
   if (pol?.forward === 'mentions') {
     if (event === 'edit') {
@@ -175,7 +228,7 @@ export function decideDelete(d: { id?: string; channel_id?: string; guild_id?: s
   if (!d.guild_id) return o.includeDms ? ok('dm') : drop('dm');
   if (o.allow.size && !inSet(o.allow)) return drop('not-in-channels');
   if (inSet(o.deny)) return drop('skip_channels');
-  const pol = policyOf(o, d.guild_id);
+  const pol = policyOf(o, d.guild_id, cid, parentId);
   if (pol?.forward === 'none') return drop('guild.none');
   if (pol?.forward === 'mentions') {
     if (!o.qualified?.get(String(d.id ?? ''))) return drop('guild.mentions');
@@ -245,7 +298,7 @@ export function decideEvent(kind: EventKind, e: EventInfo, o: FilterOpts): { for
   }
   const cid = e.channelId ?? '';
   const inSet = (s: Set<string>) => (!!cid && s.has(cid)) || (!!e.parentId && s.has(e.parentId));
-  const pol = policyOf(o, e.guildId);
+  const pol = policyOf(o, e.guildId, cid || null, e.parentId);
   if (pol?.forward === 'none') return { forward: false, why: 'guild.none' };
   if (pol?.forward === 'mentions' && !(pol.reactions_to_bot && kind.startsWith('reaction') && e.toBot)) return { forward: false, why: 'guild.mentions' };
   if (cid && o.allow.size && !inSet(o.allow)) return { forward: false, why: 'not-in-channels' };

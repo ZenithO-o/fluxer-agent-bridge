@@ -2,7 +2,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { CFG_DIR, INSTANCE, OWNER, STATE_DIR, parseEnvFile } from './config.js';
-import { decideMessage, parseGuilds, parseIgnore, toIdSet, MODES, type Mode } from './plugins/forward-filter.js';
+import { decideMessage, parseGuilds, parseIgnore, policyFor, toIdSet, MODES, type Mode } from './plugins/forward-filter.js';
 import { trustBlock } from './untrusted.js';
 import { guard, parseCtx, truthy } from './guard.js';
 import { parse as parseToml } from 'smol-toml';
@@ -217,8 +217,10 @@ async function filterCheck(bot: string, argv: string[]): Promise<number> {
   const opts = { mode, selfId: String(me.id), home: toIdSet(c.home_channels), allow: toIdSet(c.channels), deny: toIdSet(c.skip_channels),
     skipAuthors: toIdSet(c.skip_authors ?? ['self']), includeDms: c.include_dms !== false, includeBots: c.include_bots !== false,
     everyoneIsPing: c.everyone_is_ping === true, myRoles: roles, ownMessageIds: own, ignore: parseIgnore(c.ignore), guilds: policies, qualified: new Map<string, string>() };
-  const pol = ch?.guild_id ? policies.get(String(ch.guild_id)) : undefined;
-  console.log(`bot ${bot} (${me.id}) channel ${channel} guild ${ch?.guild_id ?? 'dm'} policy ${pol?.forward ?? 'default'} mode ${mode}`);
+  const parentId = ch?.parent_id ? String(ch.parent_id) : null;
+  const pol = ch?.guild_id ? policyFor(policies, String(ch.guild_id), channel, parentId) : undefined;
+  console.log(`bot ${bot} (${me.id}) channel ${channel}${parentId ? ` parent ${parentId}` : ''} guild ${ch?.guild_id ?? 'dm'} `
+    + `policy ${pol?.forward ?? 'default'}${pol ? ` (from ${pol.source})` : ''} mode ${mode}`);
   const msgs: any[] = await get(`/channels/${channel}/messages?limit=${limit}`);
   const counts: Record<string, number> = {};
   for (const m of [...msgs].reverse()) {
@@ -227,7 +229,7 @@ async function filterCheck(bot: string, argv: string[]): Promise<number> {
     if (ref && !m.referenced_message?.author?.id && !own.has(String(ref))) {
       try { const r: any = await get(`/channels/${m.message_reference?.channel_id ?? channel}/messages/${ref}`); if (String(r?.author?.id) === String(me.id)) own.add(String(ref)); } catch { /* unknown */ }
     }
-    const d = decideMessage(m, ch?.parent_id ? String(ch.parent_id) : null, opts);
+    const d = decideMessage(m, parentId, opts);
     const k = d.forward ? `forward:${d.reason}` : `drop:${d.why}`; counts[k] = (counts[k] ?? 0) + 1;
     const structured = (m.mentions ?? []).some((u: any) => String(u?.id) === String(me.id));
     const text = new RegExp(`<@!?${me.id}>|@${String(me.username ?? '').replace(/[^\w-]/g, '')}\\b`, 'i').test(String(m.content ?? ''));

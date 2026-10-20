@@ -4,7 +4,7 @@ import { definePlugin } from '../plugin.js';
 import { JsonKV } from '../store.js';
 import { appliedTags } from './tags.js';
 import { trustBlock, wrapItem } from '../untrusted.js';
-import { BoundedMap, GATEWAY_EVENTS, MODES, THREAD_TYPES, decideDelete, decideEvent, decideMessage, nickOf, parseEvents, parseGuilds, parseIgnore, toIdSet,
+import { BoundedMap, GATEWAY_EVENTS, MODES, THREAD_TYPES, decideDelete, decideEvent, decideMessage, nickOf, parseEvents, parseGuilds, parseIgnore, policyFor, toIdSet,
   type EventKind, type FilterOpts, type Mode, type Reason } from './forward-filter.js';
 
 /**
@@ -47,6 +47,7 @@ export default definePlugin({
     const { policies: guilds, warnings: guildWarnings } = parseGuilds((ctx.bot.config as any).guilds);
     for (const w of guildWarnings) ctx.log.warn(w);
     if (guilds.size) ctx.log.info('per-guild policies', { guilds: Object.fromEntries([...guilds].map(([g, p]) => [g, p.forward ?? 'default'])) });
+    for (const [g, p] of guilds) if (p.channels?.size) ctx.log.info('per-channel policies', { guild: g, channels: Object.fromEntries([...p.channels].map(([c, cp]) => [c, cp.forward ?? 'inherit'])) });
     const includeDms = bool(c.include_dms, true), includeEdits = bool(c.include_edits, true), includeBots = bool(c.include_bots, true);
     const includeDeletes = bool(c.include_deletes, true);
     const { kinds: eventKinds, unknown: unknownEvents } = parseEvents(c.events);
@@ -174,7 +175,7 @@ export default definePlugin({
       const parentId = ch?.parent_id ? String(ch.parent_id) : null;
       const d = decideMessage(m, parentId, filterOpts(), event);
       if (!d.forward) { st.filtered++; bump(st.filtered_by, d.why); return; }
-      if (event === 'create' && m.guild_id && guilds.get(String(m.guild_id))?.forward === 'mentions') {
+      if (event === 'create' && m.guild_id && policyFor(guilds, String(m.guild_id), String(m.channel_id ?? ''), parentId)?.forward === 'mentions') {
         qualified.set(String(m.id), d.reason); qualState.data.ids = qualified.keys().map((k) => [k, qualified.get(k)!]); qualState.save(1000);
       }
       queue(await shape(m, event, d.reason, ch, backfill), ch, !!(m.author?.bot || m.webhook_id));

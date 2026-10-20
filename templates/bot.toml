@@ -40,6 +40,9 @@ strict = false            # true = ignored channels, users, and bots are dropped
 # role_mentions = false       # also count a mention of a role the bot holds
 # everyone = false            # also count @everyone / @here
 # reactions_to_bot = false    # also forward reactions on this bot's messages
+# Per-channel override inside that guild (threads and forum posts inherit from their parent channel):
+# [guilds."<guild_id>".channels."<channel_id>"]
+# forward = "all"             # every message in this channel, normal mode rules; same keys as the guild table
 
 # Custom status shows Reading, Responding, or Responded. Idle text is presence.text above.
 # Health always wins: a degraded or broken bridge still shows that instead. Timings in seconds.
