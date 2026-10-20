@@ -17,6 +17,8 @@ export interface BotConfig {
   ignored_events: string[];
   prefix: string;
   plugins: PluginSpec[];
+  /** [guilds."<guild_id>"] tables, raw; webhook-forward parses them (forward-filter.ts parseGuilds). */
+  guilds?: Record<string, unknown>;
 }
 export interface LoadedBot {
   name: string;
@@ -73,6 +75,7 @@ export function loadBots(): { bots: LoadedBot[]; errors: string[] } {
         ignored_events: Array.isArray(parsed.ignored_events) ? parsed.ignored_events.map(String) : ['TYPING_START'],
         prefix: typeof parsed.prefix === 'string' ? parsed.prefix : '!',
         plugins: Array.isArray(parsed.plugins) ? parsed.plugins : [],
+        guilds: parsed.guilds && typeof parsed.guilds === 'object' && !Array.isArray(parsed.guilds) ? parsed.guilds : {},
       };
       const hash = crypto.createHash('sha256').update(tomlText).update('\0').update(secText).digest('hex').slice(0, 16);
       bots.push({ name, dir, config, secrets: parseEnvFile(secText), hash });

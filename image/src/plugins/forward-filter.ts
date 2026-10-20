@@ -8,6 +8,11 @@
  *   "home"         the channel (or a thread's parent) is in home_channels
  *   "all"          anything else, only in mode = "all"
  * Deletes have no mentions/author: they get "home" or "all" (never ping/reply).
+ *
+ * Per-guild policy (bot.toml [guilds."<guild_id>"], see GuildPolicy) runs after the hard drops and replaces `mode` for
+ * that guild. forward = "mentions" uses only structured data: the bot's id in `mentions`, a reply to the bot's own
+ * message (referenced_message.author.id / own-message ids / REST lookup), and, only when enabled, a role the bot holds
+ * or @everyone/@here. Message text is never inspected.
  */
 export type Mode = 'all' | 'pings-only' | 'pings-and-home';
 export const MODES: readonly Mode[] = ['all', 'pings-only', 'pings-and-home'];
@@ -27,6 +32,9 @@ export interface FilterOpts {
   myRoles: Set<string>;
   ownMessageIds: { has(id: string): boolean };
   ignore: IgnoreOpts;
+  guilds?: Map<string, GuildPolicy>;
+  /** ids of messages that qualified in a mentions-mode guild (their edits and deletes follow them) -> reason */
+  qualified?: { get(id: string): string | undefined };
 }
 export interface MsgLike {
   id?: string; channel_id?: string; guild_id?: string | null; webhook_id?: string | null;
@@ -36,6 +44,42 @@ export interface MsgLike {
   message_reference?: { message_id?: string } | null;
 }
 export type Decision = { forward: true; reason: Reason } | { forward: false; why: string };
+
+/** One [guilds."<id>"] table. More per-guild keys can be added here later (e.g. presence, reaction policy). */
+export type GuildForward = 'all' | 'mentions' | 'none';
+export interface GuildPolicy {
+  forward?: GuildForward;          // unset = the bot's normal behaviour (mode, home_channels, ...)
+  role_mentions: boolean;          // mentions mode: a mention of a role the bot holds counts (default false)
+  everyone: boolean;               // mentions mode: @everyone / @here counts (default false)
+  reactions_to_bot: boolean;       // mentions mode: forward reactions on the bot's own messages (default false)
+}
+export const GUILD_KEYS = ['forward', 'role_mentions', 'everyone', 'reactions_to_bot'];
+/** Parse the top-level [guilds] table. Bad ids are skipped; an unknown forward value fails closed to "mentions". */
+export function parseGuilds(v: unknown): { policies: Map<string, GuildPolicy>; warnings: string[] } {
+  const policies = new Map<string, GuildPolicy>(); const warnings: string[] = [];
+  const t = (v && typeof v === 'object' && !Array.isArray(v) ? v : {}) as Record<string, unknown>;
+  for (const [gid, raw] of Object.entries(t)) {
+    if (!/^[0-9]{1,25}$/.test(gid)) { warnings.push(`guilds: "${gid}" is not a guild id (skipped)`); continue; }
+    const g = (raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {}) as Record<string, unknown>;
+    for (const k of Object.keys(g)) if (!GUILD_KEYS.includes(k)) warnings.push(`guilds."${gid}": unknown key "${k}" (ignored)`);
+    let forward: GuildForward | undefined;
+    if (g.forward !== undefined) {
+      const f = String(g.forward).toLowerCase();
+      forward = f === 'all' || f === 'none' ? f : f === 'mentions' || f === 'mention' ? 'mentions' : undefined;
+      if (!forward) { forward = 'mentions'; warnings.push(`guilds."${gid}": unknown forward "${String(g.forward)}", using "mentions"`); }
+    }
+    policies.set(gid, { forward, role_mentions: g.role_mentions === true, everyone: g.everyone === true, reactions_to_bot: g.reactions_to_bot === true });
+  }
+  return { policies, warnings };
+}
+const policyOf = (o: FilterOpts, gid: string | null | undefined) => (gid && o.guilds ? o.guilds.get(String(gid)) : undefined);
+/** Structured mention for a mentions-mode guild: user id in mentions[], and roles / @everyone only when enabled. */
+export function isGuildMention(m: MsgLike, o: FilterOpts, p: GuildPolicy): boolean {
+  const self = o.selfId;
+  return (!!self && (m.mentions || []).some((u) => String(u?.id) === self))
+    || (p.role_mentions && (m.mention_roles || []).some((r) => o.myRoles.has(String(r))))
+    || (p.everyone && !!(m.mention_everyone || m.mention_here));
+}
 
 const drop = (why: string): Decision => ({ forward: false, why });
 const ok = (reason: Reason): Decision => ({ forward: true, reason });
@@ -66,7 +110,7 @@ export function isReplyToBot(m: MsgLike, o: FilterOpts): boolean {
 }
 
 /** Decide whether a MESSAGE_CREATE / MESSAGE_UPDATE is forwarded. parentId = thread's parent channel, if any. */
-export function decideMessage(m: MsgLike, parentId: string | null, o: FilterOpts): Decision {
+export function decideMessage(m: MsgLike, parentId: string | null, o: FilterOpts, event: 'create' | 'edit' = 'create'): Decision {
   const author = m.author?.id ? String(m.author.id) : '';
   if (!author) return drop('no-author');
   if (author === o.selfId) return drop('self');
@@ -81,6 +125,21 @@ export function decideMessage(m: MsgLike, parentId: string | null, o: FilterOpts
   } else {
     if (o.allow.size && !inSet(o.allow)) return drop('not-in-channels');
     if (inSet(o.deny)) return drop('skip_channels');
+  }
+
+  const pol = policyOf(o, m.guild_id);
+  if (pol?.forward === 'none') return drop('guild.none');
+  if (pol?.forward === 'mentions') {
+    if (event === 'edit') {
+      const r = o.qualified?.get(String(m.id ?? ''));
+      return r ? ok(r as Reason) : drop('guild.mentions');
+    }
+    const gp = isGuildMention(m, o, pol);
+    const gr = !gp && isReplyToBot(m, o);
+    if (!gp && !gr) return drop('guild.mentions');
+    const ig = inSet(o.ignore.channels) ? 'ignore.channels' : o.ignore.users.has(author) ? 'ignore.users' : (o.ignore.bots && botAuthor) ? 'ignore.bots' : null;
+    if (ig && o.ignore.strict) return drop(ig);
+    return ok(gp ? 'ping' : 'reply-to-bot');
   }
 
   const ping = isPing(m, o);
@@ -102,7 +161,7 @@ export function decideMessage(m: MsgLike, parentId: string | null, o: FilterOpts
 }
 
 /** Decide whether a MESSAGE_DELETE is forwarded. authorId/authorBot come from the recent-message cache (may be unknown). */
-export function decideDelete(d: { channel_id?: string; guild_id?: string | null }, parentId: string | null,
+export function decideDelete(d: { id?: string; channel_id?: string; guild_id?: string | null }, parentId: string | null,
   author: { id: string; bot: boolean } | null, o: FilterOpts): Decision {
   const cid = String(d.channel_id ?? '');
   const inSet = (s: Set<string>) => s.has(cid) || (!!parentId && s.has(parentId));
@@ -116,6 +175,13 @@ export function decideDelete(d: { channel_id?: string; guild_id?: string | null 
   if (!d.guild_id) return o.includeDms ? ok('dm') : drop('dm');
   if (o.allow.size && !inSet(o.allow)) return drop('not-in-channels');
   if (inSet(o.deny)) return drop('skip_channels');
+  const pol = policyOf(o, d.guild_id);
+  if (pol?.forward === 'none') return drop('guild.none');
+  if (pol?.forward === 'mentions') {
+    if (!o.qualified?.get(String(d.id ?? ''))) return drop('guild.mentions');
+    if (o.ignore.strict && inSet(o.ignore.channels)) return drop('ignore.channels');
+    return ok(inSet(o.home) ? 'home' : 'all');
+  }
   if (inSet(o.ignore.channels)) return drop('ignore.channels');
   if (inSet(o.home) && o.mode !== 'pings-only') return ok('home');
   if (o.mode === 'all') return ok('all');
@@ -179,6 +245,9 @@ export function decideEvent(kind: EventKind, e: EventInfo, o: FilterOpts): { for
   }
   const cid = e.channelId ?? '';
   const inSet = (s: Set<string>) => (!!cid && s.has(cid)) || (!!e.parentId && s.has(e.parentId));
+  const pol = policyOf(o, e.guildId);
+  if (pol?.forward === 'none') return { forward: false, why: 'guild.none' };
+  if (pol?.forward === 'mentions' && !(pol.reactions_to_bot && kind.startsWith('reaction') && e.toBot)) return { forward: false, why: 'guild.mentions' };
   if (cid && o.allow.size && !inSet(o.allow)) return { forward: false, why: 'not-in-channels' };
   if (cid && inSet(o.deny)) return { forward: false, why: 'skip_channels' };
   const ignored = (cid && inSet(o.ignore.channels)) ? 'ignore.channels'

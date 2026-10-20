@@ -4,7 +4,7 @@ import { definePlugin } from '../plugin.js';
 import { JsonKV } from '../store.js';
 import { appliedTags } from './tags.js';
 import { trustBlock, wrapItem } from '../untrusted.js';
-import { BoundedMap, GATEWAY_EVENTS, MODES, THREAD_TYPES, decideDelete, decideEvent, decideMessage, nickOf, parseEvents, parseIgnore, toIdSet,
+import { BoundedMap, GATEWAY_EVENTS, MODES, THREAD_TYPES, decideDelete, decideEvent, decideMessage, nickOf, parseEvents, parseGuilds, parseIgnore, toIdSet,
   type EventKind, type FilterOpts, type Mode, type Reason } from './forward-filter.js';
 
 /**
@@ -44,6 +44,9 @@ export default definePlugin({
     const mode = (MODES.includes(String(c.mode) as Mode) ? c.mode : 'all') as Mode;
     const home = ids(c.home_channels), allow = ids(c.channels), deny = ids(c.skip_channels), skipAuthors = ids(c.skip_authors ?? ['self']);
     const ignore = parseIgnore(c.ignore);
+    const { policies: guilds, warnings: guildWarnings } = parseGuilds((ctx.bot.config as any).guilds);
+    for (const w of guildWarnings) ctx.log.warn(w);
+    if (guilds.size) ctx.log.info('per-guild policies', { guilds: Object.fromEntries([...guilds].map(([g, p]) => [g, p.forward ?? 'default'])) });
     const includeDms = bool(c.include_dms, true), includeEdits = bool(c.include_edits, true), includeBots = bool(c.include_bots, true);
     const includeDeletes = bool(c.include_deletes, true);
     const { kinds: eventKinds, unknown: unknownEvents } = parseEvents(c.events);
@@ -82,6 +85,9 @@ export default definePlugin({
     const ownState = new JsonKV<{ [k: string]: unknown; ids: string[] }>(path.join(ctx.stateDir, 'own-messages.json'), { ids: [] });
     const ownIds = new BoundedMap<true>(2000); for (const i of ownState.data.ids ?? []) ownIds.set(String(i), true);
     const authors = new BoundedMap<{ id: string; bot: boolean }>(5000);
+    // messages that qualified in a mentions-mode guild: their edits and deletes are forwarded, nothing else is
+    const qualState = new JsonKV<{ [k: string]: unknown; ids: [string, string][] }>(path.join(ctx.stateDir, 'qualified.json'), { ids: [] });
+    const qualified = new BoundedMap<string>(5000); for (const [i, r] of qualState.data.ids ?? []) qualified.set(String(i), String(r));
     const botUsers = new Set<string>(); // user ids seen authoring as bots (for events that carry only a user id)
     const refCache = new BoundedMap<string | null>(500); // referenced message id -> author id (REST fallback)
 
@@ -93,7 +99,7 @@ export default definePlugin({
     ctx.status(() => ({ webhook_host: host || null, mode, ignore: { channels: ignore.channels.size, users: ignore.users.size, bots: ignore.bots, strict: ignore.strict },
       ...st, outbox: outbox.data.items.length, dropped: outbox.data.dropped }));
     const filterOpts = (): FilterOpts => ({ mode, selfId: ctx.bot.userId(), home, allow, deny, skipAuthors, includeDms, includeBots,
-      everyoneIsPing, myRoles, ownMessageIds: ownIds, ignore });
+      everyoneIsPing, myRoles, ownMessageIds: ownIds, ignore, guilds, qualified });
 
     // ---------- helpers ----------
     const chanCache = new Map<string, any>(); const guildName = new Map<string, string>();
@@ -166,8 +172,11 @@ export default definePlugin({
       if (m.author?.id && String(m.author.id) !== self) await resolveReplyAuthor(m);
       const ch = await channel(m.channel_id);
       const parentId = ch?.parent_id ? String(ch.parent_id) : null;
-      const d = decideMessage(m, parentId, filterOpts());
+      const d = decideMessage(m, parentId, filterOpts(), event);
       if (!d.forward) { st.filtered++; bump(st.filtered_by, d.why); return; }
+      if (event === 'create' && m.guild_id && guilds.get(String(m.guild_id))?.forward === 'mentions') {
+        qualified.set(String(m.id), d.reason); qualState.data.ids = qualified.keys().map((k) => [k, qualified.get(k)!]); qualState.save(1000);
+      }
       queue(await shape(m, event, d.reason, ch, backfill), ch, !!(m.author?.bot || m.webhook_id));
     }
 
@@ -177,7 +186,7 @@ export default definePlugin({
       const author = authors.get(String(d.id)) ?? (ownIds.has(String(d.id)) ? { id: ctx.bot.userId() ?? '', bot: true } : null);
       const ch = await channel(d.channel_id);
       const parentId = ch?.parent_id ? String(ch.parent_id) : null;
-      const dec = decideDelete(d, parentId, author, filterOpts());
+      const dec = decideDelete({ ...d, guild_id: d.guild_id ?? ch?.guild_id ?? null }, parentId, author, filterOpts());
       if (!dec.forward) { st.filtered++; bump(st.filtered_by, dec.why); return; }
       const base = await shape({ id: d.id, channel_id: d.channel_id, guild_id: d.guild_id ?? ch?.guild_id ?? null, content: null }, 'delete', dec.reason, ch, false);
       base.author = author ? { id: author.id, username: null, display_name: null, bot: author.bot } : null;
@@ -435,7 +444,7 @@ export default definePlugin({
           ctx.log.info(finished ? 'drained' : 'drain timed out; batch kept for redelivery', { ms: Date.now() - t0, inflight: !!outbox.data.inflight });
         }
         closed = true;
-        outbox.flush(); cursors.flush(); delivered.flush(); ownState.data.ids = ownIds.keys(); ownState.flush();
+        outbox.flush(); cursors.flush(); delivered.flush(); qualState.flush(); ownState.data.ids = ownIds.keys(); ownState.flush();
       },
     };
   },

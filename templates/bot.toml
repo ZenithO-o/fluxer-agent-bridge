@@ -34,6 +34,13 @@ users = []                # author user ids
 bots = false              # true = drop bot-authored messages, except mentions and replies to this bot
 strict = false            # true = ignored channels, users, and bots are dropped even on a mention or reply
 
+# Per-guild policy (optional). forward = "all" | "mentions" | "none"; unset = normal behaviour. See docs/reference.md.
+# [guilds."<guild_id>"]
+# forward = "mentions"        # only structured @mentions of this bot and replies to its messages
+# role_mentions = false       # also count a mention of a role the bot holds
+# everyone = false            # also count @everyone / @here
+# reactions_to_bot = false    # also forward reactions on this bot's messages
+
 # Custom status shows Reading, Responding, or Responded. Idle text is presence.text above.
 # Health always wins: a degraded or broken bridge still shows that instead. Timings in seconds.
 [[plugins]]

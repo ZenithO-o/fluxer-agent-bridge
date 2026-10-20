@@ -2,7 +2,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { parse } from 'smol-toml';
-import { decideMessage, decideDelete, decideEvent, parseEvents, nickOf, parseIgnore, toIdSet, BoundedMap } from '../dist/plugins/forward-filter.js';
+import { decideMessage, decideDelete, decideEvent, parseEvents, nickOf, parseIgnore, parseGuilds, toIdSet, BoundedMap } from '../dist/plugins/forward-filter.js';
 
 const SELF = '100000000000000001', OTHERBOT = '100000000000000002', USER = '900', G = '100000000000000010';
 const HOME = '100000000000000020', OTHERCH = '100000000000000030', GENERAL = '111', THREAD = '222';
@@ -108,4 +108,70 @@ test('nickOf: guild nick > global name > username', () => {
   assert.equal(nickOf({ username: 'u', global_name: 'G' }), 'G');
   assert.equal(nickOf({ username: 'u' }), 'u');
   assert.equal(nickOf({ username: 'u', global_name: 'G', nick: 'N2' }), 'N2', 'forwarded author objects carry nick');
+});
+
+// ---------- per-guild policy: [guilds."<id>"] forward = "mentions" ----------
+
+const PUB = '1561622443464851456', INTERNAL = '1561216435596820481';
+const gopts = (pol = { forward: 'mentions' }, qualified = new Map(), over = {}) =>
+  opts({ guilds: parseGuilds(parse(`[guilds."${PUB}"]\n` + Object.entries(pol).map(([k, v]) => `${k} = ${JSON.stringify(v)}`).join('\n')).guilds).policies, qualified, ...over });
+const pub = (over = {}) => msg({ guild_id: PUB, ...over });
+
+test('mentions guild: a structured mention of the bot is forwarded as ping', () => {
+  assert.equal(reason(decideMessage(pub({ mentions: [{ id: SELF }], content: 'hey' }), null, gopts())), 'ping');
+});
+test('mentions guild: "@zenith_bot" or the raw <@id> as text without a structured mention is not forwarded', () => {
+  assert.equal(reason(decideMessage(pub({ content: '@zenith_bot hello' }), null, gopts())), 'DROP:guild.mentions');
+  assert.equal(reason(decideMessage(pub({ content: `<@${SELF}> hello`, mentions: [] }), null, gopts())), 'DROP:guild.mentions');
+  assert.equal(reason(decideMessage(pub({ content: 'zenith_bot please answer', mentions: [{ id: USER }] }), null, gopts())), 'DROP:guild.mentions');
+});
+test('mentions guild: a reply to the bot is forwarded; a reply to someone else is not', () => {
+  assert.equal(reason(decideMessage(pub({ referenced_message: { id: 'x', author: { id: SELF } }, message_reference: { message_id: 'x' } }), null, gopts())), 'reply-to-bot');
+  assert.equal(reason(decideMessage(pub({ message_reference: { message_id: 'own1' } }), null, gopts())), 'reply-to-bot', 'own-message id (REST lookup / cache)');
+  assert.equal(reason(decideMessage(pub({ referenced_message: { id: 'y', author: { id: USER } }, message_reference: { message_id: 'y' } }), null, gopts())), 'DROP:guild.mentions');
+});
+test('mentions guild: role mentions and @everyone count only when enabled', () => {
+  assert.equal(reason(decideMessage(pub({ mention_roles: ['r1'] }), null, gopts())), 'DROP:guild.mentions');
+  assert.equal(reason(decideMessage(pub({ mention_everyone: true }), null, gopts({ forward: 'mentions' }, new Map(), { everyoneIsPing: true }))), 'DROP:guild.mentions', 'bot-wide everyone_is_ping does not apply');
+  assert.equal(reason(decideMessage(pub({ mention_roles: ['r1'] }), null, gopts({ forward: 'mentions', role_mentions: true }))), 'ping');
+  assert.equal(reason(decideMessage(pub({ mention_roles: ['other-role'] }), null, gopts({ forward: 'mentions', role_mentions: true }))), 'DROP:guild.mentions');
+  assert.equal(reason(decideMessage(pub({ mention_here: true }), null, gopts({ forward: 'mentions', everyone: true }))), 'ping');
+});
+test('mentions guild: edits and deletes follow the original message', () => {
+  const q = new Map([['55', 'ping']]);
+  assert.equal(reason(decideMessage(pub({ id: '55', content: 'edited, mention removed' }), null, gopts({ forward: 'mentions' }, q), 'edit')), 'ping');
+  assert.equal(reason(decideMessage(pub({ id: '56', mentions: [{ id: SELF }] }), null, gopts({ forward: 'mentions' }, q), 'edit')), 'DROP:guild.mentions', 'edit adding a mention to an unqualified message');
+  assert.equal(reason(decideDelete({ id: '55', channel_id: GENERAL, guild_id: PUB }, null, null, gopts({ forward: 'mentions' }, q))), 'all');
+  assert.equal(reason(decideDelete({ id: '57', channel_id: GENERAL, guild_id: PUB }, null, null, gopts({ forward: 'mentions' }, q))), 'DROP:guild.mentions');
+});
+test('mentions guild: joins, threads, typing and reactions are dropped; reactions_to_bot opts reactions on the bot back in', () => {
+  const e = (over = {}) => ({ channelId: GENERAL, parentId: null, guildId: PUB, actor: { id: USER, bot: false }, toBot: false, ...over });
+  for (const k of ['member_join', 'member_leave', 'thread_create', 'typing', 'reaction_add']) assert.equal(reason(decideEvent(k, e({ channelId: k.startsWith('member') ? null : GENERAL }), gopts())), 'DROP:guild.mentions', k);
+  assert.equal(reason(decideEvent('reaction_add', e({ toBot: true }), gopts())), 'DROP:guild.mentions', 'default off');
+  assert.equal(reason(decideEvent('reaction_add', e({ toBot: true }), gopts({ forward: 'mentions', reactions_to_bot: true }))), 'reaction-to-bot');
+  assert.equal(reason(decideEvent('reaction_add', e(), gopts({ forward: 'mentions', reactions_to_bot: true }))), 'DROP:guild.mentions', 'reaction on someone else');
+});
+test('hard drops still win in a mentions guild; forward = "none" drops everything', () => {
+  assert.equal(reason(decideMessage(pub({ author: { id: SELF, bot: true }, mentions: [{ id: SELF }] }), null, gopts())), 'DROP:self');
+  assert.equal(reason(decideMessage(pub({ mentions: [{ id: SELF }] }), null, gopts({ forward: 'mentions' }, new Map(), { deny: new Set([GENERAL]) }))), 'DROP:skip_channels');
+  assert.equal(reason(decideMessage(pub({ mentions: [{ id: SELF }] }), null, gopts({ forward: 'none' }))), 'DROP:guild.none');
+  assert.equal(reason(decideEvent('member_join', { channelId: null, parentId: null, guildId: PUB, actor: { id: USER, bot: false }, toBot: false }, gopts({ forward: 'none' }))), 'DROP:guild.none');
+});
+test('unconfigured guilds, forward = "all" and DMs keep the existing behaviour', () => {
+  const o = gopts();
+  assert.equal(reason(decideMessage(msg({ guild_id: INTERNAL }), null, o)), 'all');
+  assert.equal(reason(decideMessage(msg({ guild_id: INTERNAL, mention_roles: ['r1'] }), null, o)), 'ping');
+  assert.equal(reason(decideMessage(msg({ guild_id: INTERNAL, id: '9' }), null, o, 'edit')), 'all');
+  assert.equal(reason(decideMessage(msg({ guild_id: null }), null, o)), 'dm');
+  assert.equal(reason(decideEvent('member_join', { channelId: null, parentId: null, guildId: INTERNAL, actor: { id: USER, bot: false }, toBot: false }, o)), 'all');
+  assert.equal(reason(decideMessage(pub(), null, gopts({ forward: 'all' }))), 'all');
+  assert.equal(reason(decideMessage(pub(), null, opts())), 'all', 'no guilds table at all');
+});
+test('parseGuilds: ids, unknown keys, and an unknown forward value fails closed to mentions', () => {
+  const r = parseGuilds(parse('[guilds."123"]\nforward = "mention"\n[guilds."456"]\nforward = "pings"\ncolour = 1\n[guilds.abc]\nforward = "all"').guilds);
+  assert.equal(r.policies.get('123').forward, 'mentions'); assert.equal(r.policies.get('456').forward, 'mentions');
+  assert.equal(r.policies.has('abc'), false);
+  assert.equal(r.warnings.length, 3);
+  assert.equal(parseGuilds(undefined).policies.size, 0);
+  assert.deepEqual(parseGuilds(parse('[guilds."1"]\nrole_mentions = true').guilds).policies.get('1'), { forward: undefined, role_mentions: true, everyone: false, reactions_to_bot: false });
 });

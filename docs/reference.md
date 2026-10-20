@@ -95,6 +95,32 @@ ignored_events = ["TYPING_START", "PRESENCE_UPDATE"]
 
 `presence.status` is `online`, `idle`, or `dnd`. The idle custom status is the top-level `idle_status` if set, else `presence.text`, else `Online`. An empty string means no custom status. `prefix` is for plugin commands. Fluxer has no slash commands.
 
+### Per-guild policy
+
+Top-level tables in `bot.toml`, one per guild id. They apply to `webhook-forward` (live messages, edits, deletes, extra events and backfill). DMs and guilds without a table keep the bot's normal behaviour.
+
+```toml
+[guilds."1561622443464851456"]   # a public server: only talk when spoken to
+forward = "mentions"             # "all" | "mentions" | "none". Unset = the bot's normal mode
+role_mentions = false            # mentions: also count a mention of a role the bot holds
+everyone = false                 # mentions: also count @everyone / @here
+reactions_to_bot = false         # mentions: also forward reactions on the bot's own messages
+```
+
+| `forward` | Messages | Edits and deletes | Joins, reactions, threads, typing, other events |
+|---|---|---|---|
+| unset or `all` | the bot's `mode`, `home_channels`, ignore list, as without a table | as without a table | as without a table |
+| `mentions` | only a structured mention of the bot (its user id in the message's `mentions` array; `reason: "ping"`), or a reply to one of the bot's messages (`referenced_message.author.id`, a known own message id, or one REST lookup of the referenced message; `reason: "reply-to-bot"`). Message text is never read: `@zenith_bot` typed as text, or a raw `<@id>` that Fluxer did not turn into a mention, is dropped | only for a message that qualified (its id is tracked in `qualified.json`, last 5000); an edit keeps the original reason, a delete gets `home` or `all` | dropped; with `reactions_to_bot = true`, a reaction on the bot's own message is forwarded as `reaction-to-bot` |
+| `none` | dropped | dropped | dropped |
+
+The bot-wide hard drops still run first (own messages, `skip_authors`, `include_bots`, `channels`, `skip_channels`). In `mentions` mode the ignore list drops only with `strict = true`, as for any mention. The bot-wide `everyone_is_ping` and role mentions do not apply inside a `mentions` guild; use the table's own keys. Dropped items count as `guild.mentions` or `guild.none` in `filtered_by`. An unknown `forward` value logs a warning and is treated as `mentions`. Unknown keys log a warning. More per-guild keys (for example presence or a reaction policy) will be added to this table. The payload is unchanged.
+
+Check a policy against real traffic without sending anything (GET requests only, prints ids and decisions, never text):
+
+```sh
+sudo docker exec bot-bridge-OWNER node /app/dist/cli.js filter-check BOT CHANNEL_ID --limit 50
+```
+
 ### `webhook-forward`
 
 ```toml
