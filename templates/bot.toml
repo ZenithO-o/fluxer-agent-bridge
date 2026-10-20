@@ -2,7 +2,7 @@
 # Field reference: docs/reference.md.
 enabled = true
 prefix = "!"
-presence = { status = "online", text = "Relaying" }   # idle text. Activity replaces it only while the bot is healthy
+presence = { status = "online", text = "Online" }   # idle text (default "Online"; idle_status = "..." overrides). Activity replaces it only while the bot is healthy
 ignored_events = ["TYPING_START", "PRESENCE_UPDATE"]
 
 # Agent bots: forward Fluxer events to the owner's webhook (the agent's inbox).

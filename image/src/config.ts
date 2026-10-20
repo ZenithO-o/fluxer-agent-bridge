@@ -26,6 +26,14 @@ export interface LoadedBot {
   hash: string;
 }
 
+export const DEFAULT_IDLE_TEXT = 'Online';
+/** Idle custom status: top-level idle_status, else presence.text, else "Online". An explicit "" means no custom status. */
+export function idleText(parsed: Record<string, any>): string {
+  if (typeof parsed.idle_status === 'string') return parsed.idle_status;
+  if (typeof parsed.presence?.text === 'string') return parsed.presence.text;
+  return DEFAULT_IDLE_TEXT;
+}
+
 export function parseEnvFile(text: string): Record<string, string> {
   const out: Record<string, string> = {};
   for (const raw of text.split('\n')) {
@@ -61,7 +69,7 @@ export function loadBots(): { bots: LoadedBot[]; errors: string[] } {
       const config: BotConfig = {
         name,
         enabled: parsed.enabled !== false,
-        presence: { status: parsed.presence?.status ?? 'online', text: parsed.presence?.text },
+        presence: { status: parsed.presence?.status ?? 'online', text: idleText(parsed) },
         ignored_events: Array.isArray(parsed.ignored_events) ? parsed.ignored_events.map(String) : ['TYPING_START'],
         prefix: typeof parsed.prefix === 'string' ? parsed.prefix : '!',
         plugins: Array.isArray(parsed.plugins) ? parsed.plugins : [],

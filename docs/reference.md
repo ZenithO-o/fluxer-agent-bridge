@@ -89,11 +89,11 @@ If `ignored_events` is omitted, the loader defaults to `TYPING_START` only, not 
 ```toml
 enabled = true
 prefix = "!"
-presence = { status = "online", text = "Relaying" }
+presence = { status = "online", text = "Online" }
 ignored_events = ["TYPING_START", "PRESENCE_UPDATE"]
 ```
 
-`presence.status` is `online`, `idle`, or `dnd`. `prefix` is for plugin commands. Fluxer has no slash commands.
+`presence.status` is `online`, `idle`, or `dnd`. The idle custom status is the top-level `idle_status` if set, else `presence.text`, else `Online`. An empty string means no custom status. `prefix` is for plugin commands. Fluxer has no slash commands.
 
 ### `webhook-forward`
 
@@ -167,7 +167,7 @@ typing_means_responding = true
 
 | State | Text | Entered | Left |
 |---|---|---|---|
-| idle | `presence.text`, or `idle_text` if set | start, and after the timeouts | a later state |
+| idle | `idle_text` if set, else the bot's idle status (`idle_status`, `presence.text`, or `Online`) | start, and after the timeouts | a later state |
 | reading | `Reading NICK's message`, `Reading NICK's messages`, or `Reading multiple messages` | webhook accepted a batch with creates or edits | Responding, or `reading_seconds` after the last such batch |
 | responding | `Responding to NICK's message` | the bot's own typing, or `status.sh responding` | Responded, or `responding_seconds` |
 | responded | `Responded to NICK's message` | the bot's own new message on the gateway | `responded_seconds` |
