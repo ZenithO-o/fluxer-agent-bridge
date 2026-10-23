@@ -149,7 +149,7 @@ sudo docker exec bot-bridge-OWNER node /app/dist/cli.js filter-check BOT CHANNEL
 use = "webhook-forward"
 mode = "all"              # "all" | "pings-and-home" | "pings-only"
 home_channels = []
-include_dms = true
+include_dms = false       # default false: DMs are dropped unless a bot sets true
 include_edits = true
 include_deletes = true
 include_bots = true

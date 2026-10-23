@@ -22,7 +22,7 @@ export async function run(plugin, extraConfig = {}) {
   const ctx = {
     client: { rest: { get: async (p) => { const m = p.match(/^\/channels\/(\d+)$/); if (m && CHANS[m[1]]) return CHANS[m[1]]; if (p.startsWith('/guilds/')) return { name: 'Example Guild' }; throw new Error('404'); } }, guilds: new Map() },
     bot: { name: 'my_bot', owner: 'alice', userId: () => SELF, config: {} },
-    config: { use: 'webhook-forward', mode: 'all', batch_seconds: 0.1, max_per_post: 50, events: ['reactions', 'member_join'], ...extraConfig },
+    config: { use: 'webhook-forward', mode: 'all', batch_seconds: 0.1, max_per_post: 50, events: ['reactions', 'member_join'], include_dms: true, ...extraConfig },
     secrets: { WEBHOOK_URL: `http://127.0.0.1:${srv.address().port}/hook`, WEBHOOK_AUTH: 'Bearer test' },
     log: { info() {}, warn() {}, error() {}, debug() {} },
     stateDir: fs.mkdtempSync(path.join(os.tmpdir(), 'bbtest-')),

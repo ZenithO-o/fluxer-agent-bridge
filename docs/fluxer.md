@@ -24,4 +24,4 @@ Resetting a bot token kills every session. The token is `<app_id>.<secret>` and 
 
 Adding a bot to a community needs Manage Community on that community. A non-public bot can only be added by its owner.
 
-Some instances disable DMs. `include_dms` then has nothing to forward. That is a property of the instance, not of this bridge.
+DMs are off by default in this bridge: `include_dms` defaults to `false`, so DM events are dropped unless a bot sets `include_dms = true`. Some instances also disable DMs. `include_dms` then has nothing to forward. That is a property of the instance, not of this bridge.

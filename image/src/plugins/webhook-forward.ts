@@ -48,7 +48,7 @@ export default definePlugin({
     for (const w of guildWarnings) ctx.log.warn(w);
     if (guilds.size) ctx.log.info('per-guild policies', { guilds: Object.fromEntries([...guilds].map(([g, p]) => [g, p.forward ?? 'default'])) });
     for (const [g, p] of guilds) if (p.channels?.size) ctx.log.info('per-channel policies', { guild: g, channels: Object.fromEntries([...p.channels].map(([c, cp]) => [c, cp.forward ?? 'inherit'])) });
-    const includeDms = bool(c.include_dms, true), includeEdits = bool(c.include_edits, true), includeBots = bool(c.include_bots, true);
+    const includeDms = bool(c.include_dms, false), includeEdits = bool(c.include_edits, true), includeBots = bool(c.include_bots, true);
     const includeDeletes = bool(c.include_deletes, true);
     const { kinds: eventKinds, unknown: unknownEvents } = parseEvents(c.events);
     if (unknownEvents.length) ctx.log.warn('unknown events in config (ignored)', { events: unknownEvents });

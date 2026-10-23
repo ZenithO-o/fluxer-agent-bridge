@@ -12,7 +12,7 @@ ignored_events = ["TYPING_START", "PRESENCE_UPDATE"]
 use = "webhook-forward"
 mode = "all"
 home_channels = []        # messages here are tagged reason = "home"
-include_dms = true        # forward DMs (if your instance allows DMs to bots)
+include_dms = false       # DMs are off by default (unset = false); set true to forward DMs to this bot
 include_edits = true      # MESSAGE_UPDATE -> event "edit"
 include_deletes = true    # MESSAGE_DELETE -> event "delete" (no content)
 include_bots = true       # forward other bots' messages (own messages are never forwarded)

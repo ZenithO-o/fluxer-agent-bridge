@@ -215,7 +215,7 @@ async function filterCheck(bot: string, argv: string[]): Promise<number> {
   if (ch?.guild_id) { try { roles = new Set(((await get(`/guilds/${ch.guild_id}/members/${me.id}`))?.roles ?? []).map(String)); } catch { /* ignore */ } }
   const mode = (MODES.includes(String(c.mode) as Mode) ? c.mode : 'all') as Mode;
   const opts = { mode, selfId: String(me.id), home: toIdSet(c.home_channels), allow: toIdSet(c.channels), deny: toIdSet(c.skip_channels),
-    skipAuthors: toIdSet(c.skip_authors ?? ['self']), includeDms: c.include_dms !== false, includeBots: c.include_bots !== false,
+    skipAuthors: toIdSet(c.skip_authors ?? ['self']), includeDms: c.include_dms === true, includeBots: c.include_bots !== false,
     everyoneIsPing: c.everyone_is_ping === true, myRoles: roles, ownMessageIds: own, ignore: parseIgnore(c.ignore), guilds: policies, qualified: new Map<string, string>() };
   const parentId = ch?.parent_id ? String(ch.parent_id) : null;
   const pol = ch?.guild_id ? policyFor(policies, String(ch.guild_id), channel, parentId) : undefined;

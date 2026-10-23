@@ -37,6 +37,7 @@ test('mode all: batches every message except own, tags reasons, forwards edits/d
   await fire('MESSAGE_UPDATE', { id: '101', channel_id: '11', guild_id: G, author: a('100000000000000002', true), content: 'edited', edited_timestamp: 'x' });
   await fire('MESSAGE_DELETE', { id: '105', channel_id: '13', guild_id: G });
   await fire('MESSAGE_DELETE', { id: '100', channel_id: '10', guild_id: G });
+  await fire('MESSAGE_CREATE', { id: '106', channel_id: '20', author: a('900'), content: 'dm, dropped: include_dms defaults to false' });
   await new Promise((r) => setTimeout(r, 1500));
   const before = posts.flatMap((p) => p.body.messages).length;
   await fire('MESSAGE_REACTION_ADD', { user_id: '900', channel_id: '10', message_id: '100', guild_id: G, emoji: { name: '👍' }, member: { nick: 'Zee', user: a('900') } });
